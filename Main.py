@@ -1,5 +1,14 @@
-# streamlit2.py
-# Effective / Activity / Excess Canalization Graph Explorer + Schemata Viewer
+# Main.py
+# Effective / Activity / Excess Canalization / Correlation Graph Explorer + Schemata Viewer
+
+import os
+import io
+import base64
+import math
+import re
+import tempfile
+from copy import copy
+>>>>>>> 94ed627 (version 1.1)
 
 import numpy as np
 import matplotlib as mpl
@@ -415,6 +424,7 @@ def build_graphviz_structural(SG, node_values, special_nodes_set, positions, nod
 def add_edges_structural(g, SG, edge_values, vmin, vmax, thr=None):
     for u, v, d in SG.edges(data=True):
         key = (u, v)
+<<<<<<< HEAD
         if key in edge_values:
             val = edge_values[key]
             # remove edges with value <= threshold
@@ -428,6 +438,223 @@ def add_edges_structural(g, SG, edge_values, vmin, vmax, thr=None):
 
 
 # ---------- Schemata plotting (F' and F'') ----------
+=======
+
+        if key not in edge_values:
+            continue
+
+        val = float(edge_values[key])
+        comp_val = abs(val) if threshold_on_abs else val
+
+        if (
+            show_zero_dashed_at_zero_threshold
+            and thr is not None
+            and np.isclose(thr, 0.0)
+            and np.isclose(val, 0.0)
+        ):
+            zero_edges.append((u, v))
+            continue
+
+        if thr is not None and comp_val <= thr:
+            continue
+
+        normal_edges.append(("metric", u, v, val))
+
+    for item in normal_edges:
+        if item[0] == "default":
+            _, u, v = item
+            g.edge(str(u), str(v), penwidth="1.0", color="#2ca02c")
+        else:
+            _, u, v, val = item
+
+            width_val = abs(val) if threshold_on_abs else val
+            width = metric_to_width(width_val, vmin, vmax)
+
+            color = "black"
+            style = "solid"
+
+            if signed_color:
+                if val < 0:
+                    color = NEG_EDGE_COLOR
+                    if negative_dashed:
+                        style = NEG_EDGE_STYLE
+                else:
+                    color = POS_EDGE_COLOR
+
+            g.edge(
+                str(u), str(v),
+                penwidth=f"{width:.2f}",
+                color=color,
+                style=style
+            )
+
+    for u, v in zero_edges:
+        port_kwargs = curved_zero_edge_ports(
+            u, v, positions, should_curve=has_overlapping_opposite_edge(SG, u, v)
+        )
+        g.edge(
+            str(u), str(v),
+            penwidth="3.5",
+            color=ZERO_EDGE_COLOR,
+            style=ZERO_EDGE_STYLE,
+            **port_kwargs
+        )
+
+
+# ---------- Legend ----------
+def _legend_line(color="black", style="solid", width=3):
+    dash_style = "solid" if style == "solid" else "dashed"
+    return (
+        f"<span style='display:inline-block; width:36px; vertical-align:middle; "
+        f"border-top:{width}px {dash_style} {color}; margin-right:8px;'></span>"
+    )
+
+
+def _legend_node(fill="#ffffff", outline="#000000"):
+    return (
+        f"<span style='display:inline-block; width:16px; height:16px; border-radius:50%; "
+        f"background:{fill}; border:3px solid {outline}; margin-right:8px; vertical-align:middle;'></span>"
+    )
+
+
+def render_graph_legend(metric, threshold_value, degree_mode, scale_max):
+    node_items = [
+        (_legend_node(fill="#f7f7f7", outline=DEFAULT_OUTLINE), "regular node"),
+        (_legend_node(fill="#f7f7f7", outline=SPECIAL_OUTLINE), "input node"),
+        (_legend_node(fill="#f7f7f7", outline=ISOLATED_OUTLINE), "isolated after thresholding"),
+    ]
+
+    if metric == "Edge effectiveness":
+        edge_items = [
+            (_legend_line(color="black", style="solid", width=3), "thicker = larger effectiveness"),
+            (_legend_line(color="red", style="dashed", width=3), "weight = 0"),
+        ]
+    elif metric == "Activity":
+        edge_items = [
+            (_legend_line(color="black", style="solid", width=3), "thicker = larger activity"),
+            (_legend_line(color="red", style="dashed", width=3), "activity = 0"),
+        ]
+    elif metric == "Excess canalization":
+        edge_items = [
+            (_legend_line(color="black", style="solid", width=3), "thicker = larger excess canalization"),
+        ]
+    else:
+        edge_items = [
+            (_legend_line(color="black", style="solid", width=3), "positive correlation; thicker = larger |correlation|"),
+            (_legend_line(color="black", style="dashed", width=3), "negative correlation"),
+            (_legend_line(color="red", style="dashed", width=3), "correlation = 0"),
+        ]
+
+    row_style = "margin:6px 0; padding:6px 8px; border-radius:10px; background:rgba(248,250,252,0.95); border:1px solid rgba(148,163,184,0.14);"
+    node_html = "".join([
+        f"<div style='{row_style}'>{icon}<span>{label}</span></div>"
+        for icon, label in node_items
+    ])
+    edge_html = "".join([
+        f"<div style='{row_style}'>{icon}<span>{label}</span></div>"
+        for icon, label in edge_items
+    ])
+
+    scale_title = f"Node color scale ({degree_mode.lower()})"
+    scale_min = 0.0
+    scale_max = float(scale_max) if float(scale_max) > 0 else 0.0
+
+    gradient_bar = (
+        "linear-gradient(to right, "
+        "#2ca02c 0%, "
+        "#f7f7f7 18%, "
+        "#fddbc7 45%, "
+        "#fca082 70%, "
+        "#f1695c 85%, "
+        "#d62728 100%)"
+    )
+
+    scale_html = f"""
+    <div style="margin-top:6px; padding:8px 10px; border-radius:12px; background:rgba(248,250,252,0.95); border:1px solid rgba(148,163,184,0.14);">
+        <div style="
+            width:100%;
+            height:16px;
+            border:1px solid #999;
+            border-radius:8px;
+            background:{gradient_bar};
+        "></div>
+        <div style="display:flex; justify-content:space-between; font-size:0.9em; margin-top:4px;">
+            <span>0.00</span>
+            <span>{scale_max:.2f}</span>
+        </div>
+        <div style="font-size:0.9em; color:#444; margin-top:4px;">
+            Green = zero, darker red = larger {degree_mode.lower()} value
+        </div>
+    </div>
+    """
+
+    html = f"""
+    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin-bottom:6px; color:#0f172a;">Nodes</div>
+    {node_html}
+    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin:12px 0 6px 0; color:#0f172a;">Edges</div>
+    {edge_html}
+    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin:12px 0 6px 0; color:#0f172a;">{scale_title}</div>
+    {scale_html}
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def clean_svg_for_panel(svg_text):
+    svg_text = re.sub(r"<\?xml[^>]*\?>", "", svg_text, flags=re.IGNORECASE)
+    svg_text = re.sub(r"<!DOCTYPE[^>]*>", "", svg_text, flags=re.IGNORECASE)
+    svg_text = re.sub(r"</?div[^>]*>", "", svg_text, flags=re.IGNORECASE).strip()
+
+    # Remove fixed SVG size attributes so the browser can scale tall figures more
+    # reliably inside the square panel without clipping.
+    svg_text = re.sub(r'\swidth="[^"]*"', '', svg_text, count=1)
+    svg_text = re.sub(r'\sheight="[^"]*"', '', svg_text, count=1)
+
+    if 'preserveAspectRatio=' in svg_text:
+        svg_text = re.sub(
+            r'preserveAspectRatio="[^"]*"',
+            'preserveAspectRatio="xMidYMid meet"',
+            svg_text,
+            count=1
+        )
+    else:
+        svg_text = re.sub(
+            r'<svg',
+            '<svg preserveAspectRatio="xMidYMid meet"',
+            svg_text,
+            count=1
+        )
+
+    if 'class="canalization-map-svg"' not in svg_text:
+        svg_text = re.sub(
+            r'<svg',
+            '<svg class="canalization-map-svg"',
+            svg_text,
+            count=1
+        )
+
+    return svg_text
+
+
+# ---------- Schemata plotting ----------
+def _safe_compute_schemata(node):
+    try:
+        node._check_compute_canalization_variables(prime_implicants=True)
+    except Exception:
+        pass
+
+    try:
+        node._check_compute_canalization_variables(two_symbols=True)
+    except Exception:
+        pass
+
+    if (getattr(node, "_prime_implicants", None) is None) or (getattr(node, "_two_symbols", None) is None):
+        try:
+            if hasattr(node, "schemata"):
+                node.schemata()
+        except Exception:
+            pass
+
+>>>>>>> 94ed627 (version 1.1)
 
 def plot_schemata(n):
     """
@@ -724,8 +951,47 @@ st.sidebar.image(
     width=120,  # smaller logo
 )
 
+<<<<<<< HEAD
 st.sidebar.header("Controls")
 target_name = st.sidebar.selectbox("Select model", names, index=names.index(default_name), key="model_select")
+=======
+uploaded_cnet = st.sidebar.file_uploader(
+    "Upload a .cnet  Boolean network file",
+    type=["cnet", "txt"],
+    key="uploaded_cnet_file"
+)
+
+use_uploaded = uploaded_cnet is not None
+
+uploaded_bn = None
+uploaded_name = None
+uploaded_error = None
+
+if use_uploaded:
+    try:
+        uploaded_bytes = uploaded_cnet.getvalue()
+        uploaded_bn = load_uploaded_cnet_from_bytes(uploaded_bytes, uploaded_cnet.name)
+        uploaded_name = get_bn_display_name(uploaded_bn, fallback=uploaded_cnet.name)
+        st.sidebar.success(f"Loaded uploaded network: {uploaded_name}")
+    except Exception as e:
+        uploaded_error = str(e)
+        st.sidebar.error("Could not load the uploaded CNET file.")
+        st.sidebar.caption(uploaded_error)
+
+if failed_extra:
+    with st.sidebar.expander("Extra CANA models that failed to load"):
+        for k, v in failed_extra.items():
+            st.write(f"**{k}**")
+            st.caption(v)
+
+selected_model_name = st.sidebar.selectbox(
+    "Select model",
+    all_model_names,
+    index=all_model_names.index(default_name),
+    key="model_select",
+    disabled=use_uploaded
+)
+>>>>>>> 94ed627 (version 1.1)
 
 metric = st.sidebar.selectbox(
     "Metric",
@@ -768,8 +1034,12 @@ thr = st.sidebar.slider(
     key="thr_slider"
 )
 
+<<<<<<< HEAD
 node_size_key = f"node_size_in_{target_name}"
 node_size_in = st.sidebar.slider("Node size (inches)", 0.1, 1.0, adaptive_default, 0.05, key=node_size_key)
+=======
+node_size_in = adaptive_default
+>>>>>>> 94ed627 (version 1.1)
 
 # ----- Node dropdown AFTER sliders (for F', F'' + canalization map) -----
 node_names = [getattr(node, "name", f"node_{i}") for i, node in enumerate(bn.nodes)]
@@ -851,6 +1121,7 @@ elif metric in ("Activity", "Excess canalization"):
 # -------------------- Description --------------------
 st.markdown(f"### {bn.name}")
 
+<<<<<<< HEAD
 if metric == "Edge effectiveness":
     desc = (
         "Edges with value ≤ threshold are removed; "
@@ -871,27 +1142,87 @@ else:  # Excess canalization
         "Nodes with no incoming or outgoing edges after thresholding are outlined in gray."
     )
 
+=======
+>>>>>>> 94ed627 (version 1.1)
 st.markdown(
-    f"<p style='font-size:18px; font-weight:500; margin-top:4px;'>{desc}</p>",
+    """
+    <style>
+    .dashboard-side-card {
+        background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 18px;
+        padding: 18px 18px 16px 18px;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+    }
+    .dashboard-side-card .section-label {
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #64748b;
+        margin-bottom: 0.35rem;
+    }
+    .dashboard-side-card .section-title {
+        font-size: 1.02rem;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 0.8rem;
+    }
+    .dashboard-side-card .divider {
+        height: 1px;
+        background: linear-gradient(90deg, rgba(148, 163, 184, 0.12), rgba(148, 163, 184, 0.45), rgba(148, 163, 184, 0.12));
+        margin: 16px 0 14px 0;
+    }
+    .histogram-shell {
+        background: #ffffff;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 16px;
+        padding: 12px 10px 6px 10px;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.85);
+    }
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
+<<<<<<< HEAD
 # -------------------- Layout: graph left, legend + histogram right --------------------
 c1, c2 = st.columns([3.0, 1.0], gap="small")
+=======
+c1, c2 = st.columns([3.0, 1.05], gap="medium")
+>>>>>>> 94ed627 (version 1.1)
 
 with c1:
     st.graphviz_chart(g, use_container_width=True)
 
 with c2:
+<<<<<<< HEAD
     # Legend (colorbar)
     st.pyplot(colorbar_figure(max_val, cbar_label))
+=======
+    st.markdown(
+        """
+        <div class="dashboard-side-card">
+            <div class="section-label">Network guide</div>
+            <div class="section-title">Legend and distribution</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    render_graph_legend(metric, thr, degree_mode, max_val)
+>>>>>>> 94ed627 (version 1.1)
 
     # Histogram directly below legend, same column width
     if weights:
-        fig2, ax2 = plt.subplots(figsize=(2.5, 2.5))
-        ax2.hist(weights, bins=24)
-        ax2.axvline(thr, linestyle="--", color='red')
+        st.markdown(
+            """
+            <div class="divider"></div>
+            <div class="section-title" style="margin-bottom:10px; font-weight:800;">Edge value histogram</div>
+            """,
+            unsafe_allow_html=True
+        )
 
+<<<<<<< HEAD
         if metric == "Edge effectiveness":
             ax2.set_title("Edge effectiveness (all edges)", fontsize=8)
             ax2.set_xlabel("Effectiveness")
@@ -926,3 +1257,168 @@ CM_gv = draw_canalizing_map_graphviz(CM)
 
 # If CM_gv is a graphviz.Source or Digraph, this works:
 st.graphviz_chart(CM_gv)
+=======
+        fig2, ax2 = plt.subplots(figsize=(4.2, 3.35))
+
+        if metric == "Correlation":
+            pos_abs = [abs(w) for w in weights if w >= 0]
+            neg_abs = [abs(w) for w in weights if w < 0]
+            bins = np.linspace(0.0, 1.0, 29)
+
+            ax2.hist(
+                [pos_abs, neg_abs],
+                bins=bins,
+                stacked=True,
+                label=["positive", "negative"]
+            )
+            ax2.axvline(abs(thr), linestyle="--", color='red', linewidth=2)
+            ax2.set_title("Edge correlation", fontsize=10, pad=10)
+            ax2.set_xlabel("|Correlation|")
+            ax2.set_xlim(0.0, 1.0)
+            ax2.legend(frameon=False, fontsize=8)
+        else:
+            ax2.hist(weights, bins=28)
+            ax2.axvline(thr, linestyle="--", color='red', linewidth=2)
+
+            if metric == "Edge effectiveness":
+                ax2.set_title("Edge effectiveness", fontsize=10, pad=10)
+                ax2.set_xlabel("Effectiveness")
+            elif metric == "Activity":
+                ax2.set_title("Edge activity", fontsize=10, pad=10)
+                ax2.set_xlabel("Activity")
+            elif metric == "Excess canalization":
+                ax2.set_title("Edge excess canalization", fontsize=10, pad=10)
+                ax2.set_xlabel("Excess canalization")
+
+        ax2.set_ylabel("Count")
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        ax2.grid(alpha=0.18)
+
+        fig2.tight_layout(pad=1.1)
+        st.pyplot(fig2, use_container_width=True)
+        plt.close(fig2)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown(f"### Node schematas and canalization map for `{selected_node_name}`")
+
+SQUARE_PANEL_SIZE_PX = 700
+st.markdown(
+    f"""
+    <style>
+    .square-figure-panel {{
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        max-height: {SQUARE_PANEL_SIZE_PX}px;
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: visible;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+        box-sizing: border-box;
+    }}
+    .figure-media-wrap {{
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: visible;
+    }}
+    .figure-media-wrap img {{
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: 100%;
+        display: block;
+        margin: auto;
+        object-fit: contain;
+    }}
+    .cmap-panel {{
+        padding: 14px;
+        background: #fcfcfc;
+    }}
+    .cmap-inner {{
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: visible;
+    }}
+    .cmap-inner svg,
+    .canalization-map-svg {{
+        display: block;
+        margin: auto;
+        max-width: 100%;
+        max-height: 100%;
+        width: auto;
+        height: auto;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+schemata_col, cmap_col = st.columns(2, gap="medium")
+
+with schemata_col:
+    st.markdown("#### Node schematas")
+    try:
+        schemata_fig = plot_schemata(selected_node)
+        buf = io.BytesIO()
+        schemata_fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.35, dpi=200, facecolor="white")
+        buf.seek(0)
+        schemata_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        st.markdown(
+            f'''
+            <div class="square-figure-panel">
+                <div class="figure-media-wrap">
+                    <img src="data:image/png;base64,{schemata_b64}" alt="Node schematas" />
+                </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+        plt.close(schemata_fig)
+    except Exception as e:
+        st.warning(f"Could not draw F' / F'' schematas for this node: {e}")
+
+with cmap_col:
+    st.markdown("#### Canalization map")
+    try:
+        try:
+            CM = selected_node.canalizing_map(bound='upper')
+        except TypeError:
+            CM = selected_node.canalizing_map()
+
+        CM_gv = draw_canalizing_map_graphviz(CM)
+        try:
+            CM_gv.graph_attr.update({
+                "pad": "0.02",
+                "margin": "0.0",
+                "ratio": "compress"
+            })
+        except Exception:
+            pass
+
+        svg = CM_gv.pipe(format="svg").decode("utf-8")
+        svg = clean_svg_for_panel(svg)
+        svg_b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+        st.markdown(
+            f'''
+            <div class="square-figure-panel cmap-panel">
+                <div class="figure-media-wrap">
+                    <img src="data:image/svg+xml;base64,{svg_b64}" alt="Canalization map" />
+                </div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+    except Exception as e:
+        st.warning(f"Could not draw the canalization map for this node: {e}")
+>>>>>>> 94ed627 (version 1.1)
