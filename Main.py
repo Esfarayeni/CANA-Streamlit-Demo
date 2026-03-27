@@ -1,4 +1,4 @@
-# Main.py
+# streamlit2_with_legends.py
 # Effective / Activity / Excess Canalization / Correlation Graph Explorer + Schemata Viewer
 
 import os
@@ -8,7 +8,6 @@ import math
 import re
 import tempfile
 from copy import copy
->>>>>>> 94ed627 (version 1.1)
 
 import numpy as np
 import matplotlib as mpl
@@ -17,16 +16,15 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle, Circle, RegularPolygon
 from matplotlib.collections import PatchCollection
 from matplotlib.text import Text
-from copy import copy
 
 import streamlit as st
 import graphviz
 
+from cana.boolean_network import BooleanNetwork as BN
 from cana.datasets.bio import load_all_cell_collective_models
+import cana.datasets.bio as bio
 from cana.drawing.canalizing_map import draw_canalizing_map_graphviz
-# NOTE: assuming draw_canalizing_map_graphviz is defined/imported elsewhere in this file,
-# as in your notebook snippet:
-# from some_module import draw_canalizing_map_graphviz
+
 
 # -------------------- Page & style --------------------
 st.set_page_config(page_title="Effective Graph Threshold Explorer", layout="wide")
@@ -44,43 +42,159 @@ MAX_WIDTH = 4.0
 
 DEFAULT_OUTLINE   = "#ff9896"
 SPECIAL_OUTLINE   = "#ffdf0e"
-ISOLATED_OUTLINE  = "#888888"   # outline color for isolated nodes (no in/out after threshold)
+ISOLATED_OUTLINE  = "#888888"
+
+POS_EDGE_COLOR      = "black"
+NEG_EDGE_COLOR      = "black"
+NEG_EDGE_STYLE      = "dashed"
+ZERO_EDGE_COLOR     = "red"
+ZERO_EDGE_STYLE     = "dashed"
 
 cmap = LinearSegmentedColormap.from_list('custom', ['white', '#d62728'])
 cmap.set_under('#2ca02c')  # nodes with zero value → green
 
 
+# -------------------- Helpers --------------------
 def _norm(s: str) -> str:
     return str(s).strip().lower()
 
 
+def get_bn_display_name(bn, fallback="Boolean Network"):
+    name = getattr(bn, "name", None)
+    if name is None:
+        return fallback
+    name = str(name).strip()
+    return name if name else fallback
+
+
+def clone_bn_if_possible(bn):
+    try:
+        if hasattr(bn, "copy"):
+            return bn.copy()
+    except Exception:
+        pass
+    return bn
+
+
+def try_load_bio_constant(model_name, dataset_obj):
+    if isinstance(dataset_obj, BN):
+        bn = clone_bn_if_possible(dataset_obj)
+        if not getattr(bn, "name", None):
+            bn.name = model_name.replace("_", " ").title()
+        return bn
+
+    if isinstance(dataset_obj, str):
+        load_attempts = [
+            lambda: BN.from_file(dataset_obj, type='cnet'),
+            lambda: BN.from_file(dataset_obj),
+        ]
+        for attempt in load_attempts:
+            try:
+                bn = attempt()
+                if not getattr(bn, "name", None):
+                    bn.name = model_name.replace("_", " ").title()
+                return bn
+            except Exception:
+                pass
+
+    if callable(dataset_obj):
+        try:
+            obj = dataset_obj()
+            return try_load_bio_constant(model_name, obj)
+        except Exception:
+            pass
+
+    raise ValueError(f"Could not load extra bio model: {model_name}")
+
+
 @st.cache_resource(show_spinner=True)
-def load_models():
+def load_cell_collective_models():
     return list(load_all_cell_collective_models())
 
 
-def list_model_names(models):
-    return [m.name.strip() for m in models]
+@st.cache_resource(show_spinner=True)
+def load_extra_bio_models():
+    extra_names = [
+        "BREAST_CANCER",
+        "BUDDING_YEAST",
+        "DROSOPHILA",
+        "LEUKEMIA",
+        "MARQUESPITA",
+        "THALIANA",
+    ]
+
+    loaded = {}
+    failed = {}
+
+    for const_name in extra_names:
+        try:
+            dataset_obj = getattr(bio, const_name)
+            bn = try_load_bio_constant(const_name, dataset_obj)
+
+            pretty_name = get_bn_display_name(
+                bn,
+                fallback=const_name.replace("_", " ").title()
+            )
+
+            if pretty_name in loaded:
+                pretty_name = f"{pretty_name} ({const_name})"
+
+            loaded[pretty_name] = bn
+        except Exception as e:
+            failed[const_name] = str(e)
+
+    return loaded, failed
 
 
-def get_model_by_name(models, target_name: str):
-    tgt = target_name.strip().lower()
-    for m in models:
-        if m.name.strip().lower() == tgt:
-            return m
-    for m in models:
-        if tgt in m.name.strip().lower():
-            return m
-    return None
+@st.cache_resource(show_spinner=True)
+def load_uploaded_cnet_from_bytes(file_bytes: bytes, filename: str):
+    suffix = os.path.splitext(filename)[1] if filename else ".txt"
+    if not suffix:
+        suffix = ".txt"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        bn = BN.from_file(tmp_path, type='cnet')
+        return bn
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def build_model_registry():
+    registry = {}
+
+    cc_models = load_cell_collective_models()
+    for m in cc_models:
+        display_name = get_bn_display_name(m, fallback="Unnamed Cell Collective Model")
+        registry[display_name] = {
+            "bn": m,
+            "source": "Cell Collective"
+        }
+
+    extra_models, failed_extra = load_extra_bio_models()
+    for display_name, bn in extra_models.items():
+        if display_name in registry:
+            display_name = f"{display_name} (extra bio)"
+        registry[display_name] = {
+            "bn": bn,
+            "source": "CANA bio"
+        }
+
+    return registry, failed_extra
 
 
 def detect_special_nodes(bn, G):
-    """Detect k=0 or k=1 self-loop nodes, mapped to graph G by label."""
     special_norm_labels = set()
     for node in bn.nodes:
-        name   = getattr(node, "name", f"node_{getattr(node, 'id', 'X')}")
+        name = getattr(node, "name", f"node_{getattr(node, 'id', 'X')}")
         inputs = list(getattr(node, "inputs", []) or [])
-        k      = getattr(node, "k", len(inputs))
+        k = getattr(node, "k", len(inputs))
 
         def is_self(inp):
             try:
@@ -117,15 +231,19 @@ def detect_special_nodes(bn, G):
 def circular_positions(G, radius=RADIUS):
     nodes = list(G.nodes())
     N = len(nodes)
+    if N == 0:
+        return [], {}
+
     label = lambda n: G.nodes[n].get('label', str(n))
     sorted_nodes = sorted(nodes, key=label)
-    pos = {n: (radius*np.cos(2*np.pi*i/N), radius*np.sin(2*np.pi*i/N))
-           for i, n in enumerate(sorted_nodes)}
+    pos = {
+        n: (radius * np.cos(2 * np.pi * i / N), radius * np.sin(2 * np.pi * i / N))
+        for i, n in enumerate(sorted_nodes)
+    }
     return sorted_nodes, pos
 
 
 def threshold_graph(EG0, thr):
-    """Remove edges with w ≤ thr (keep only w > thr) on effective graph."""
     EGf = EG0.copy()
     EGf.remove_edges_from([
         (u, v) for u, v, d in EGf.edges(data=True)
@@ -135,28 +253,21 @@ def threshold_graph(EG0, thr):
 
 
 def colorbar_figure(max_val, label_text):
-    # Colorbar style
-    cmap = LinearSegmentedColormap.from_list('custom', ['white', '#d62728'])
-    cmap.set_under('#2ca02c')
+    cmap_local = LinearSegmentedColormap.from_list('custom', ['white', '#d62728'])
+    cmap_local.set_under('#2ca02c')
 
     norm = mpl.colors.Normalize(vmin=1e-16, vmax=max_val if max_val > 0 else 1)
 
-    # Slightly larger but still small figure, with good resolution
     fig = plt.figure(figsize=(0.8, 1.6), dpi=200)
-    #          width   height (inches)
-
-    # Leave enough room for label + ticks
     ax = fig.add_axes([0.03, 0.05, 0.15, 0.6])
-    #      left bottom width height
 
-    # Ticks
-    tick_max = int(max_val)
+    tick_max = int(np.ceil(max_val))
     ticks = list(range(0, tick_max + 1, max(1, tick_max // 4 or 1)))
     boundaries = np.linspace(-1, max_val, 25).tolist()
 
     cb = mpl.colorbar.ColorbarBase(
         ax,
-        cmap=cmap,
+        cmap=cmap_local,
         norm=norm,
         boundaries=boundaries,
         ticks=ticks,
@@ -172,16 +283,7 @@ def colorbar_figure(max_val, label_text):
     return fig
 
 
-# ---------- Helper: detect isolated nodes after threshold ----------
-
-def isolated_nodes_after_threshold(G, edge_values=None, thr=None):
-    """
-    Return nodes with in-degree == 0 and out-degree == 0
-    in the thresholded graph (according to the metric/threshold).
-    For structural graphs:
-      - if edge_values[key] exists and val <= thr -> remove edge
-      - if no metric for edge -> keep edge (as in add_edges_structural)
-    """
+def isolated_nodes_after_threshold(G, edge_values=None, thr=None, use_abs=False):
     H = G.copy()
     if edge_values is not None and thr is not None:
         to_remove = []
@@ -189,7 +291,8 @@ def isolated_nodes_after_threshold(G, edge_values=None, thr=None):
             key = (u, v)
             if key in edge_values:
                 val = edge_values[key]
-                if val <= thr:
+                test_val = abs(val) if use_abs else val
+                if test_val <= thr:
                     to_remove.append((u, v))
         H.remove_edges_from(to_remove)
 
@@ -199,17 +302,98 @@ def isolated_nodes_after_threshold(G, edge_values=None, thr=None):
     }
 
 
-# ---------- Effective-graph (edge effectiveness) visualization ----------
+def node_values_from_thresholded_effective(EGf, degree_mode="Out-degree"):
+    if degree_mode == "In-degree":
+        vals = {n: EGf.in_degree(n, weight='weight') for n in EGf.nodes()}
+    else:
+        vals = {n: EGf.out_degree(n, weight='weight') for n in EGf.nodes()}
+    for n in EGf.nodes():
+        vals.setdefault(n, 0.0)
+    return vals
 
-def build_graphviz_effective(EG0, EGf, special_nodes_set, positions, node_width_in, isolated_nodes=None):
+
+def node_values_from_thresholded_structural(SG, edge_values, thr, degree_mode="Out-degree", use_abs=False):
+    node_vals = {n: 0.0 for n in SG.nodes()}
+    for (u, v), val in edge_values.items():
+        comp_val = abs(val) if use_abs else val
+        if comp_val > thr:
+            add_val = abs(val) if use_abs else max(0.0, val)
+            if degree_mode == "In-degree":
+                node_vals[v] += add_val
+            else:
+                node_vals[u] += add_val
+    return node_vals
+
+
+# ---------- Curved zero-edge helpers ----------
+_COMPASS = ["e", "ne", "n", "nw", "w", "sw", "s", "se"]
+
+def _angle_to_compass(dx, dy):
+    angle = math.degrees(math.atan2(dy, dx)) % 360.0
+    idx = int(round(angle / 45.0)) % 8
+    return _COMPASS[idx]
+
+def _shift_compass(port, step):
+    idx = _COMPASS.index(port)
+    return _COMPASS[(idx + step) % 8]
+
+def curved_zero_edge_ports(u, v, positions, should_curve=False):
+    """
+    Keep normal edges on the default path.
+    Only curve a zero edge when it overlaps with an opposite-direction edge.
+    """
+    if not should_curve:
+        return {}
+
+    if u not in positions or v not in positions:
+        return {}
+
+    x1, y1 = positions[u]
+    x2, y2 = positions[v]
+    dx = x2 - x1
+    dy = y2 - y1
+
+    if np.isclose(dx, 0.0) and np.isclose(dy, 0.0):
+        return {}
+
+    tail_base = _angle_to_compass(dx, dy)
+    head_base = _angle_to_compass(-dx, -dy)
+
+    # shift both ends to the same side for a mild curved/offset route
+    tail_port = _shift_compass(tail_base, 1)
+    head_port = _shift_compass(head_base, 1)
+
+    return {
+        "tailport": tail_port,
+        "headport": head_port,
+    }
+
+
+def has_overlapping_opposite_edge(graph_obj, u, v):
+    """Return True when the reverse edge also exists, so the two edges would overlap on the same centerline."""
+    try:
+        return graph_obj.has_edge(v, u)
+    except Exception:
+        return False
+
+
+# ---------- Effective-graph visualization ----------
+def build_graphviz_effective(
+    EG0,
+    node_values,
+    special_nodes_set,
+    positions,
+    node_width_in,
+    isolated_nodes=None,
+):
     if isolated_nodes is None:
         isolated_nodes = set()
 
-    outdeg_f = {n: EGf.out_degree(n, weight='weight') for n in EGf.nodes()}
     for n in EG0.nodes():
-        outdeg_f.setdefault(n, 0.0)
-    max_outdeg_f = max(outdeg_f.values()) if outdeg_f else 1.0
-    norm_mpl = mpl.colors.Normalize(vmin=1e-16, vmax=max_outdeg_f if max_outdeg_f > 0 else 1)
+        node_values.setdefault(n, 0.0)
+
+    max_node_val = max(node_values.values()) if node_values else 1.0
+    norm_mpl = mpl.colors.Normalize(vmin=1e-16, vmax=max_node_val if max_node_val > 0 else 1)
 
     g = graphviz.Digraph(engine='neato')
     g.attr(
@@ -218,7 +402,7 @@ def build_graphviz_effective(EG0, EGf, special_nodes_set, positions, node_width_
         ratio='1',
         margin='0.2',
         pad='0.1',
-        splines='True',
+        splines='true',
     )
     g.attr(
         'node',
@@ -235,13 +419,12 @@ def build_graphviz_effective(EG0, EGf, special_nodes_set, positions, node_width_
 
     label = lambda n: EG0.nodes[n].get('label', str(n))
     for n, (x, y) in positions.items():
-        out_d = outdeg_f.get(n, 0.0)
-        if out_d == 0:
+        val = node_values.get(n, 0.0)
+        if val == 0:
             fill = '#2ca02c'
         else:
-            fill = mpl.colors.rgb2hex(cmap(norm_mpl(out_d)))
+            fill = mpl.colors.rgb2hex(cmap(norm_mpl(val)))
 
-        # outline logic: isolated → gray; else special/default
         if n in isolated_nodes:
             outline = ISOLATED_OUTLINE
         elif n in special_nodes_set:
@@ -250,22 +433,45 @@ def build_graphviz_effective(EG0, EGf, special_nodes_set, positions, node_width_
             outline = DEFAULT_OUTLINE
 
         g.node(str(n), label(n), pos=f"{x:.3f},{y:.3f}!", color=outline, fillcolor=fill)
-    return g, max_outdeg_f
+
+    return g, max_node_val
 
 
-def add_edges_effective(g, EG0, thr):
+def add_edges_effective(g, EG0, thr, positions):
+    normal_edges = []
+    zero_edges = []
+
     for u, v, d in EG0.edges(data=True):
         w = float(d.get('weight', 0.0))
+
+        if np.isclose(thr, 0.0) and np.isclose(w, 0.0):
+            zero_edges.append((u, v))
+            continue
+
         if w <= thr:
             continue
+
+        normal_edges.append((u, v, w))
+
+    for u, v, w in normal_edges:
         pen = max(0.5, min(PENWIDTH_MAX, PENWIDTH_MAX * w)) if w > 0 else 1.5
-        g.edge(str(u), str(v), penwidth=f"{pen:.2f}")
+        g.edge(str(u), str(v), penwidth=f"{pen:.2f}", color="black")
+
+    for u, v in zero_edges:
+        port_kwargs = curved_zero_edge_ports(
+            u, v, positions, should_curve=has_overlapping_opposite_edge(EG0, u, v)
+        )
+        g.edge(
+            str(u), str(v),
+            penwidth="3.5",
+            color=ZERO_EDGE_COLOR,
+            style=ZERO_EDGE_STYLE,
+            **port_kwargs
+        )
 
 
-# ---------- Structural metrics: Activity & Excess canalization ----------
-
+# ---------- Structural metrics ----------
 def metric_to_width(val, vmin, vmax, wmin=MIN_WIDTH, wmax=MAX_WIDTH):
-    """Map metric to edge width."""
     if vmax > vmin:
         t = (val - vmin) / (vmax - vmin)
     else:
@@ -274,12 +480,10 @@ def metric_to_width(val, vmin, vmax, wmin=MIN_WIDTH, wmax=MAX_WIDTH):
 
 
 def compute_structural_metrics(bn):
-    """Compute edge activity and edge excess (effectiveness - activity) on SG."""
     SG = bn.structural_graph()
     if SG.number_of_nodes() == 0:
-        return SG, {}, (0.0, 1.0), {}, 1.0, {}, (0.0, 1.0), {}, 1.0
+        return SG, {}, (0.0, 1.0), {}, (0.0, 1.0)
 
-    # Map SG node IDs <-> normalized labels
     sg_label = {n: SG.nodes[n].get('label', str(n)) for n in SG.nodes()}
     sg_label_norm = {n: _norm(lbl) for n, lbl in sg_label.items()}
     sg_by_label_norm = {lbln: n for n, lbln in sg_label_norm.items()}
@@ -329,7 +533,6 @@ def compute_structural_metrics(bn):
             edge_activity[(u, v)] = act_val
             edge_activity_vals.append(act_val)
 
-            # excess = effectiveness - activity, if availability allows
             if eff_list is not None and i < len(eff_list):
                 eff = eff_list[i]
                 if np.isfinite(eff):
@@ -349,26 +552,90 @@ def compute_structural_metrics(bn):
         arr = np.array(edge_excess_vals)
         ex_min, ex_max = arr.min(), arr.max()
 
-    # Aggregate outgoing values per node (full, not thresholded yet)
-    node_out_activity = {n: 0.0 for n in SG.nodes()}
-    for (u, v), val in edge_activity.items():
-        node_out_activity[u] = node_out_activity.get(u, 0.0) + max(0.0, val)
-    max_out_activity = max(node_out_activity.values()) if node_out_activity else 1.0
+    return SG, edge_activity, (act_min, act_max), edge_excess, (ex_min, ex_max)
 
-    node_out_excess = {n: 0.0 for n in SG.nodes()}
-    for (u, v), val in edge_excess.items():
-        node_out_excess[u] = node_out_excess.get(u, 0.0) + max(0.0, val)
-    max_out_excess = max(node_out_excess.values()) if node_out_excess else 1.0
 
-    return (
-        SG,
-        edge_activity, (act_min, act_max), node_out_activity, max_out_activity,
-        edge_excess, (ex_min, ex_max), node_out_excess, max_out_excess
-    )
+# ---------- Correlation metric ----------
+def generate_input_columns(k):
+    if k <= 0:
+        return np.zeros((1, 0), dtype=int)
+
+    rows = []
+    for s in range(2 ** k):
+        bits = [int(b) for b in format(s, f"0{k}b")]
+        rows.append(bits)
+    return np.array(rows, dtype=int)
+
+
+def safe_binary_corr(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if x.size == 0 or y.size == 0 or x.size != y.size:
+        return 0.0
+    if np.allclose(x, x[0]) or np.allclose(y, y[0]):
+        return 0.0
+
+    c = np.corrcoef(x, y)[0, 1]
+    if not np.isfinite(c):
+        return 0.0
+    return float(c)
+
+
+def compute_correlation_metrics(bn):
+    SG = bn.structural_graph()
+    if SG.number_of_nodes() == 0:
+        return SG, {}, (0.0, 1.0)
+
+    sg_label = {n: SG.nodes[n].get('label', str(n)) for n in SG.nodes()}
+    sg_label_norm = {n: _norm(lbl) for n, lbl in sg_label.items()}
+    sg_by_label_norm = {lbln: n for n, lbln in sg_label_norm.items()}
+
+    edge_corr = {}
+    corr_abs_vals = []
+
+    for node in bn.nodes:
+        name = getattr(node, "name", f"node_{getattr(node, 'id', 'X')}")
+        tgt_norm = _norm(name)
+        v = sg_by_label_norm.get(tgt_norm, None)
+        if v is None:
+            continue
+
+        inputs = list(getattr(node, "inputs", []) or [])
+        k = getattr(node, "k", len(inputs))
+
+        if k <= 0 or len(inputs) == 0:
+            continue
+
+        outputs = getattr(node, "outputs", None)
+        if outputs is None:
+            continue
+
+        outputs = np.asarray(list(outputs), dtype=float)
+        if outputs.size != 2 ** k:
+            continue
+
+        input_table = generate_input_columns(k)
+        preds = list(SG.predecessors(v))
+
+        L = min(len(preds), k, input_table.shape[1])
+        for i in range(L):
+            u = preds[i]
+            col = input_table[:, i]
+            corr = safe_binary_corr(col, outputs)
+            edge_corr[(u, v)] = corr
+            corr_abs_vals.append(abs(corr))
+
+    if not corr_abs_vals:
+        cmin, cmax = 0.0, 1.0
+    else:
+        arr = np.array(corr_abs_vals)
+        cmin, cmax = float(arr.min()), float(arr.max())
+
+    return SG, edge_corr, (cmin, cmax)
 
 
 def build_graphviz_structural(SG, node_values, special_nodes_set, positions, node_width_in, isolated_nodes=None):
-    """Build Graphviz for structural metrics (activity / excess)."""
     if isolated_nodes is None:
         isolated_nodes = set()
 
@@ -385,8 +652,7 @@ def build_graphviz_structural(SG, node_values, special_nodes_set, positions, nod
         ratio='1',
         margin='0.2',
         pad='0.1',
-        splines='True',
-
+        splines='true',
     )
     g.attr(
         'node',
@@ -409,7 +675,6 @@ def build_graphviz_structural(SG, node_values, special_nodes_set, positions, nod
         else:
             fill = mpl.colors.rgb2hex(cmap(norm_mpl(val)))
 
-        # outline logic: isolated → gray; else special/default
         if n in isolated_nodes:
             outline = ISOLATED_OUTLINE
         elif n in special_nodes_set:
@@ -421,24 +686,24 @@ def build_graphviz_structural(SG, node_values, special_nodes_set, positions, nod
     return g, max_val
 
 
-def add_edges_structural(g, SG, edge_values, vmin, vmax, thr=None):
+def add_edges_structural(
+    g,
+    SG,
+    edge_values,
+    vmin,
+    vmax,
+    positions,
+    thr=None,
+    show_zero_dashed_at_zero_threshold=False,
+    signed_color=False,
+    threshold_on_abs=False,
+    negative_dashed=False,
+):
+    normal_edges = []
+    zero_edges = []
+
     for u, v, d in SG.edges(data=True):
         key = (u, v)
-<<<<<<< HEAD
-        if key in edge_values:
-            val = edge_values[key]
-            # remove edges with value <= threshold
-            if thr is not None and val <= thr:
-                continue
-            width = metric_to_width(val, vmin, vmax)
-            g.edge(str(u), str(v), penwidth=f"{width:.2f}", color="black")
-        else:
-            # gray, default-width edge when no metric is available
-            g.edge(str(u), str(v), penwidth="1.0", color="#bbbbbb")
-
-
-# ---------- Schemata plotting (F' and F'') ----------
-=======
 
         if key not in edge_values:
             continue
@@ -654,112 +919,94 @@ def _safe_compute_schemata(node):
         except Exception:
             pass
 
->>>>>>> 94ed627 (version 1.1)
 
 def plot_schemata(n):
-    """
-    Plot F' and F'' schematas for a CANA BooleanNode `n`
-    with a fixed small figure size (for Streamlit).
-    Returns a matplotlib Figure.
-    """
-    # ---------- Ensure schemata are computed ----------
-    if (getattr(n, "_prime_implicants", None) is None or
-        getattr(n, "_two_symbols", None) is None):
-        if hasattr(n, "schemata"):
-            try:
-                n.schemata()
-            except Exception:
-                pass
+    _safe_compute_schemata(n)
 
-    pi_dict = getattr(n, "_prime_implicants", {}) or {}
-    two = getattr(n, "_two_symbols", None)
-
-    pi0s = pi_dict.get('0', []) or []
-    pi1s = pi_dict.get('1', []) or []
-    if two is None:
-        ts0s, ts1s = [], []
-    else:
-        try:
-            ts0s = two[0] or []
-            ts1s = two[1] or []
-        except Exception:
-            ts0s, ts1s = [], []
-
-    # Basic parameters
     k = n.k if n.k >= 1 else 1
     inputs = n.inputs if not n.constant else [n.name]
     inputlabels = [n.network.get_node_name(i)[0] if n.network is not None else i for i in inputs]
 
-    # We still compute these for internal layout, but we DO NOT use them for figsize
+    pi_dict = getattr(n, "_prime_implicants", {}) or {}
+    pi0s = pi_dict.get('0', []) or []
+    pi1s = pi_dict.get('1', []) or []
+
+    two_symbols = getattr(n, "_two_symbols", None)
+    if two_symbols is None:
+        ts0s, ts1s = [], []
+    else:
+        ts0s = two_symbols[0] if len(two_symbols) > 0 and two_symbols[0] is not None else []
+        ts1s = two_symbols[1] if len(two_symbols) > 1 and two_symbols[1] is not None else []
+
     n_pi = sum(len(pis) for pis in [pi0s, pi1s])
     n_ts = sum(len(tss) for tss in [ts0s, ts1s])
 
-    # ---------- FIXED small figure size ----------
-    fig_width, fig_height = 3.0, 1.6   # <<– make this smaller/bigger if you want
-    # --------------------------------------------
-
-    cwidth = 60.
+    cwidth = 60.0
     cxspace = 0
     cyspace = 6
     border = 1
     sepcxspace = 21
     sepcyspace = 15
+    dpi = 150.0
 
-    ax1width  = (k * (cwidth + cxspace)) + sepcxspace + cwidth
-    ax1height = (max(n_pi, 1) * (cwidth + cyspace)) + sepcyspace - cyspace
-    ax2width  = (k * (cwidth + cxspace)) + sepcxspace + cwidth
-    ax2height = (max(n_ts, 1) * (cwidth + cyspace)) + sepcyspace - cyspace
+    top, right, bottom, left, hs = 160, 25, 25, 60, 60
 
-    # ---------- Figure + subplots ----------
-    fig = plt.figure(figsize=(fig_width, fig_height), dpi=150)
-    gs = fig.add_gridspec(
-        1, 2, width_ratios=[1, 1],
-        left=0.05, right=0.98, bottom=0.2, top=0.85, wspace=0.25
-    )
-    ax1 = fig.add_subplot(gs[0, 0])  # F'
-    ax2 = fig.add_subplot(gs[0, 1])  # F''
+    ax1width = (k * (cwidth + cxspace)) + sepcxspace + cwidth
+    ax2width = (k * (cwidth + cxspace)) + sepcxspace + cwidth
 
-    # ===================== F' (prime implicants) =====================
-    from matplotlib.patches import Rectangle
-    from matplotlib.collections import PatchCollection
-    from matplotlib.text import Text
+    n_pi_eff = max(n_pi, 1)
+    n_ts_eff = max(n_ts, 1)
+
+    ax1height = n_pi_eff * (cwidth + cyspace) + sepcyspace - cyspace
+    ax2height = n_ts_eff * (cwidth + cyspace) + sepcyspace - cyspace
+
+    fwidth = left + ax1width + hs + ax2width + right
+    fheight = bottom + max(ax1height, ax2height) + top
+
+    _ax1w = ax1width / fwidth
+    _ax2w = ax2width / fwidth
+    _ax1h = ax1height / fheight
+    _ax2h = ax2height / fheight
+    _bottom = bottom / fheight
+    _left = left / fwidth
+    _hs = hs / fwidth
+
+    fig = plt.figure(figsize=(fwidth / dpi, fheight / dpi), facecolor='w', dpi=dpi)
+    ax1 = fig.add_axes((_left, _bottom, _ax1w, _ax1h), aspect=1, label='PI')
+    ax2 = fig.add_axes((_left + _ax1w + _hs, _bottom, _ax2w, _ax2h), aspect=1, label='TS')
 
     yticks = []
     patches = []
-    x, y = 0., 0.
+    x, y = 0.0, 0.0
+    xticks_pi = []
 
     for out, pis in zip([1, 0], [pi1s, pi0s]):
         for pi in pis:
-            x = 0.
-            xticks = []
-            for inp in pi:
-                if inp == '0':
+            x = 0.0
+            xticks_pi = []
+            for input_val in pi:
+                if input_val == '0':
                     facecolor = 'white'
                     textcolor = 'black'
-                elif inp == '1':
+                elif input_val == '1':
                     facecolor = 'black'
                     textcolor = 'white'
-                elif inp == '#':
+                elif input_val in ['#', '2']:
                     facecolor = '#cccccc'
                     textcolor = 'black'
                 else:
                     facecolor = 'white'
                     textcolor = 'black'
 
-                text = inp if inp != '2' else '#'
+                text = f'{input_val}' if input_val != '2' else '#'
                 ax1.add_artist(Text(
-                    x + cwidth / 2, y + cwidth * 0.4,
-                    text=text, color=textcolor,
-                    va='center', ha='center',
-                    fontsize=10,  # slightly smaller
-                    family='serif'
+                    x + cwidth / 2, y + cwidth / 10 * 4,
+                    text=text, color=textcolor, va='center', ha='center',
+                    fontsize=14, family='serif'
                 ))
-                r = Rectangle(
-                    (x, y), width=cwidth, height=cwidth,
-                    facecolor=facecolor, edgecolor='black'
-                )
+                r = Rectangle((x, y), width=cwidth, height=cwidth, facecolor=facecolor, edgecolor='black')
                 patches.append(r)
-                xticks.append(x + cwidth / 2)
+                xticks_pi.append(x + cwidth / 2)
                 x += cwidth + cxspace
 
             x += sepcxspace
@@ -769,21 +1016,19 @@ def plot_schemata(n):
                 edgecolor='black'
             )
             ax1.add_artist(Text(
-                x - (sepcxspace / 2) - (cxspace / 2),
-                y + cwidth * 0.4,
-                text=':', color='black',
-                va='center', ha='center',
-                fontsize=10, weight='bold', family='serif'
+                x - (sepcxspace / 2) - (cxspace / 2), y + cwidth / 10 * 4,
+                text=':', color='black', va='center', ha='center',
+                fontsize=14, weight='bold', family='serif'
             ))
             ax1.add_artist(Text(
-                x + cwidth / 2, y + cwidth * 0.4,
+                x + (cwidth / 2), y + cwidth / 10 * 4,
                 text=str(out),
                 color='white' if out == 1 else 'black',
                 va='center', ha='center',
-                fontsize=10, family='serif'
+                fontsize=14, family='serif'
             ))
             patches.append(r)
-            xticks.append(x + cwidth / 2)
+            xticks_pi.append(x + cwidth / 2)
             yticks.append(y + cwidth / 2)
             y += cwidth + cyspace
         y += sepcyspace
@@ -791,90 +1036,86 @@ def plot_schemata(n):
     if patches:
         ax1.add_collection(PatchCollection(patches, match_original=True))
 
-    if yticks:
-        ax1.set_yticks(yticks)
-        ax1.set_yticklabels(
-            [rf"$f^{{'}}_{{{i+1}}}$" for i in range(len(yticks))[::-1]],
-            fontsize=8
-        )
-    else:
-        ax1.set_yticks([])
+    ax1.set_yticks(yticks)
+    ax1.set_yticklabels([r"$f^{'}_{%d}$" % (i + 1) for i in range(n_pi)[::-1]], fontsize=14)
 
-    if 'xticks' in locals() and xticks:
-        ax1.set_xticks(xticks)
-        ax1.set_xticklabels(inputlabels + [str(n.name)], rotation=90, fontsize=8)
+    if xticks_pi:
+        ax1.set_xticks(xticks_pi)
+        ax1.set_xticklabels(inputlabels + [f'{n.name}'], rotation=90, fontsize=14)
     else:
         ax1.set_xticks([])
 
+    ax1.xaxis.tick_top()
+    ax1.tick_params(which='major', pad=7)
+    for tic in ax1.xaxis.get_major_ticks():
+        tic.tick1line.set_visible(False)
+        tic.tick2line.set_visible(False)
+    for tic in ax1.yaxis.get_major_ticks():
+        tic.tick1line.set_visible(False)
+        tic.tick2line.set_visible(False)
+
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.spines['bottom'].set_visible(False)
+    ax1.spines['left'].set_visible(False)
+
     ax1.set_xlim(-border, ax1width + border)
     ax1.set_ylim(-border, ax1height + border)
-    ax1.invert_yaxis()
-    ax1.xaxis.tick_top()
-    ax1.tick_params(which='major', pad=4)
-    for tic in ax1.xaxis.get_major_ticks():
-        tic.tick1On = tic.tick2On = False
-    for tic in ax1.yaxis.get_major_ticks():
-        tic.tick1On = tic.tick2On = False
-    for side in ['top', 'right', 'bottom', 'left']:
-        ax1.spines[side].set_visible(False)
-    ax1.set_title("F' schematas", fontsize=10, pad=6)
 
-    # ===================== F'' (two-symbol schematas) =====================
-    from matplotlib.patches import Circle, RegularPolygon
+    x, y = 0.0, 0.0
     yticks = []
     boxes, symbols = [], []
-    x, y = 0., 0.
+    xticks_ts = []
 
     tssymbols = [
         Circle((0, 0), radius=5, facecolor='white', edgecolor='black'),
-        RegularPolygon((0, 0), numVertices=3, radius=5, orientation=0,
-                       facecolor='white', edgecolor='black'),
+        RegularPolygon((0, 0), numVertices=3, radius=5, orientation=0, facecolor='white', edgecolor='black'),
     ]
 
     for out, tss in zip([1, 0], [ts1s, ts0s]):
         for ts, pss, sss in tss:
-            x = 0.
-            xticks = []
-            for i, inp in enumerate(ts):
-                if inp == '0':
+            x = 0.0
+            xticks_ts = []
+            for i, input_val in enumerate(ts):
+                if input_val == '0':
                     facecolor = 'white'
                     textcolor = 'black'
-                elif inp == '1':
+                elif input_val == '1':
                     facecolor = 'black'
                     textcolor = 'white'
-                elif inp == '2':
+                elif input_val == '2':
                     facecolor = '#cccccc'
                     textcolor = 'black'
                 else:
                     facecolor = 'white'
                     textcolor = 'black'
 
-                if pss:
+                if len(pss):
                     iinpss = [j for j, ps in enumerate(pss) if i in ps]
                     xpos = np.linspace(x, x + cwidth, len(iinpss) + 2)
                     for z, j in enumerate(iinpss, start=1):
                         if j >= len(tssymbols):
                             continue
                         s = copy(tssymbols[j])
-                        s.xy = (xpos[z], y + cwidth * 0.8)
-                        s.center = (xpos[z], y + cwidth * 0.8)
-                        s.set_edgecolor('#a6a6a6' if inp == '1' else 'black')
+                        s.set_facecolor('none')
+                        if hasattr(s, "xy"):
+                            s.xy = (xpos[z], y + cwidth * 0.8)
+                        if hasattr(s, "center"):
+                            s.center = (xpos[z], y + cwidth * 0.8)
+                        s.set_zorder(10)
+                        s.set_edgecolor('#a6a6a6' if input_val == '1' else 'black')
                         symbols.append(s)
                         ax2.add_patch(s)
 
-                text = inp if inp != '2' else '#'
+                text = f'{input_val}' if input_val != '2' else '#'
                 ax2.add_artist(Text(
-                    x + cwidth / 2, y + cwidth * 0.4,
-                    text=text, color=textcolor,
-                    va='center', ha='center',
-                    fontsize=10, family='serif'
+                    x + cwidth / 2, y + cwidth / 10 * 4,
+                    text=text, color=textcolor, va='center', ha='center',
+                    fontsize=14, family='serif'
                 ))
-                r = Rectangle(
-                    (x, y), width=cwidth, height=cwidth,
-                    facecolor=facecolor, edgecolor='#4c4c4c', zorder=2
-                )
+                r = Rectangle((x, y), width=cwidth, height=cwidth, facecolor=facecolor, edgecolor='#4c4c4c', zorder=2)
                 boxes.append(r)
-                xticks.append(x + cwidth / 2)
+                xticks_ts.append(x + cwidth / 2)
                 x += cwidth + cxspace
 
             x += sepcxspace
@@ -884,21 +1125,19 @@ def plot_schemata(n):
                 edgecolor='#4c4c4c'
             )
             ax2.add_artist(Text(
-                x - (sepcxspace / 2) - (cxspace / 2),
-                y + cwidth / 2,
-                text=':',
-                color='black', va='center', ha='center',
-                fontsize=10, weight='bold', family='serif'
+                x - (sepcxspace / 2) - (cxspace / 2), y + cwidth / 2,
+                text=':', color='black', va='center', ha='center',
+                fontsize=14, weight='bold', family='serif'
             ))
             ax2.add_artist(Text(
-                x + cwidth / 2, y + cwidth * 0.4,
+                x + (cwidth / 2), y + cwidth / 10 * 4,
                 text=str(out),
                 color='white' if out == 1 else 'black',
                 va='center', ha='center',
-                fontsize=10, family='serif'
+                fontsize=14, family='serif'
             ))
             boxes.append(r)
-            xticks.append(x + cwidth / 2)
+            xticks_ts.append(x + cwidth / 2)
             yticks.append(y + cwidth / 2)
             y += cwidth + cyspace
         y += sepcyspace
@@ -908,53 +1147,46 @@ def plot_schemata(n):
     if symbols:
         ax2.add_collection(PatchCollection(symbols, match_original=True))
 
-    if yticks:
-        ax2.set_yticks(yticks)
-        ax2.set_yticklabels(
-            [rf"$f^{{''}}_{{{i+1}}}$" for i in range(len(yticks))[::-1]],
-            fontsize=8
-        )
-    else:
-        ax2.set_yticks([])
+    ax2.set_yticks(yticks)
+    ax2.set_yticklabels([r"$f^{''}_{%d}$" % (i + 1) for i in range(n_ts)[::-1]], fontsize=14)
 
-    if 'xticks' in locals() and xticks:
-        ax2.set_xticks(xticks)
-        ax2.set_xticklabels(inputlabels + [str(n.name)], rotation=90, fontsize=8)
+    if xticks_ts:
+        ax2.set_xticks(xticks_ts)
+        ax2.set_xticklabels(inputlabels + [f'{n.name}'], rotation=90, fontsize=14)
     else:
         ax2.set_xticks([])
 
+    ax2.xaxis.tick_top()
+    ax2.tick_params(which='major', pad=7)
+    for tic in ax2.xaxis.get_major_ticks():
+        tic.tick1line.set_visible(False)
+        tic.tick2line.set_visible(False)
+    for tic in ax2.yaxis.get_major_ticks():
+        tic.tick1line.set_visible(False)
+        tic.tick2line.set_visible(False)
+
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.spines['bottom'].set_visible(False)
+    ax2.spines['left'].set_visible(False)
+
     ax2.set_xlim(-border, ax2width + border)
     ax2.set_ylim(-border, ax2height + border)
-    ax2.invert_yaxis()
-    ax2.xaxis.tick_top()
-    ax2.tick_params(which='major', pad=4)
-    for tic in ax2.xaxis.get_major_ticks():
-        tic.tick1On = tic.tick2On = False
-    for tic in ax2.yaxis.get_major_ticks():
-        tic.tick1On = tic.tick2On = False
-    for side in ['top', 'right', 'bottom', 'left']:
-        ax2.spines[side].set_visible(False)
-    ax2.set_title("F'' schematas", fontsize=10, pad=6)
 
     return fig
 
 
-
 # -------------------- UI --------------------
-models = load_models()
-names = list_model_names(models)
-default_name = "Apoptosis Network" if "Apoptosis Network" in names else names[0]
+registry, failed_extra = build_model_registry()
+all_model_names = sorted(list(registry.keys()), key=lambda x: x.lower())
 
-# Sidebar: logo + controls
+default_name = "Apoptosis Network" if "Apoptosis Network" in all_model_names else all_model_names[0]
+
 st.sidebar.image(
     "https://casci.binghamton.edu/img/casci_logo_200.jpg",
-    width=120,  # smaller logo
+    width=120,
 )
 
-<<<<<<< HEAD
-st.sidebar.header("Controls")
-target_name = st.sidebar.selectbox("Select model", names, index=names.index(default_name), key="model_select")
-=======
 uploaded_cnet = st.sidebar.file_uploader(
     "Upload a .cnet  Boolean network file",
     type=["cnet", "txt"],
@@ -991,38 +1223,64 @@ selected_model_name = st.sidebar.selectbox(
     key="model_select",
     disabled=use_uploaded
 )
->>>>>>> 94ed627 (version 1.1)
 
 metric = st.sidebar.selectbox(
     "Metric",
-    ["Edge effectiveness", "Activity", "Excess canalization"],
+    ["Edge effectiveness", "Activity", "Excess canalization", "Correlation"],
     index=0,
     key="metric_select"
 )
 
-bn = get_model_by_name(models, target_name)
+degree_mode = st.sidebar.toggle("Use in-degree for node coloring", value=False, key="degree_toggle")
+degree_mode = "In-degree" if degree_mode else "Out-degree"
 
-# Effective graph & structural metrics
-EG0 = bn.effective_graph()
+if use_uploaded and uploaded_bn is not None:
+    bn = uploaded_bn
+    source_label = f"Uploaded file: {uploaded_cnet.name}"
+else:
+    selected_entry = registry[selected_model_name]
+    bn = selected_entry["bn"]
+    source_label = selected_entry["source"]
+
+if bn is None:
+    st.error("No Boolean network could be loaded.")
+    st.stop()
+
+bn_name = get_bn_display_name(
+    bn,
+    fallback=uploaded_cnet.name if (use_uploaded and uploaded_cnet is not None) else selected_model_name
+)
+
+try:
+    EG0 = bn.effective_graph()
+except Exception as e:
+    st.error(f"Could not build the effective graph for this network: {e}")
+    st.stop()
+
 N = EG0.number_of_nodes()
+adaptive_default = float(np.clip(3.0 / max(np.sqrt(max(N, 1)), 1.0), 0.1, 1.0))
 
-adaptive_default = float(np.clip(3.0 / max(np.sqrt(N), 1.0), 0.1, 1.0))
+try:
+    SG, edge_activity, (act_min, act_max), edge_excess, (ex_min, ex_max) = compute_structural_metrics(bn)
+except Exception as e:
+    st.error(f"Could not compute structural metrics for this network: {e}")
+    st.stop()
 
-(
-    SG,
-    edge_activity, (act_min, act_max), node_out_activity, max_out_activity,
-    edge_excess, (ex_min, ex_max), node_out_excess, max_out_excess
-) = compute_structural_metrics(bn)
+try:
+    SG_corr, edge_corr, (corr_abs_min, corr_abs_max) = compute_correlation_metrics(bn)
+except Exception as e:
+    st.error(f"Could not compute correlation metric for this network: {e}")
+    st.stop()
 
-# -------- Threshold slider depends on chosen metric --------
 if metric == "Edge effectiveness":
     thr_min, thr_max = 0.0, 1.0
 elif metric == "Activity":
     thr_min, thr_max = float(act_min), float(act_max)
-else:  # Excess canalization
+elif metric == "Excess canalization":
     thr_min, thr_max = float(ex_min), float(ex_max)
+else:
+    thr_min, thr_max = 0.0, float(corr_abs_max)
 
-# Avoid degenerate slider if min == max
 if thr_min == thr_max:
     thr_min = 0.0
 
@@ -1034,14 +1292,8 @@ thr = st.sidebar.slider(
     key="thr_slider"
 )
 
-<<<<<<< HEAD
-node_size_key = f"node_size_in_{target_name}"
-node_size_in = st.sidebar.slider("Node size (inches)", 0.1, 1.0, adaptive_default, 0.05, key=node_size_key)
-=======
 node_size_in = adaptive_default
->>>>>>> 94ed627 (version 1.1)
 
-# ----- Node dropdown AFTER sliders (for F', F'' + canalization map) -----
 node_names = [getattr(node, "name", f"node_{i}") for i, node in enumerate(bn.nodes)]
 selected_node_name = st.sidebar.selectbox(
     "Select node for F' / F'' & canalization map",
@@ -1052,8 +1304,7 @@ selected_node_name = st.sidebar.selectbox(
 selected_node_index = node_names.index(selected_node_name)
 selected_node = bn.nodes[selected_node_index]
 
-# -------------------- Build graphs based on metric --------------------
-weights = None  # for histogram (all metrics now)
+weights = None
 
 if metric == "Edge effectiveness":
     EGf = threshold_graph(EG0, thr)
@@ -1061,89 +1312,102 @@ if metric == "Edge effectiveness":
     nodes_order, pos = circular_positions(EG0)
     pos = {n: pos[n] for n in nodes_order}
 
-    # isolated nodes after threshold (no in/out edges in EGf)
     isolated = {
         n for n in EGf.nodes()
         if EGf.in_degree(n) == 0 and EGf.out_degree(n) == 0
     }
 
-    g, max_val = build_graphviz_effective(EG0, EGf, special, pos, node_size_in, isolated_nodes=isolated)
-    add_edges_effective(g, EG0, thr)
-    cbar_label = "Effective Out-degree"
+    node_vals = node_values_from_thresholded_effective(EGf, degree_mode=degree_mode)
 
-    # collect weights for histogram (all edges)
+    g, max_val = build_graphviz_effective(
+        EG0,
+        node_vals,
+        special,
+        pos,
+        node_size_in,
+        isolated_nodes=isolated
+    )
+    add_edges_effective(g, EG0, thr, pos)
+    cbar_label = f"Effective {degree_mode.lower()}"
+
     weights = [float(d.get('weight', 0.0)) for _, _, d in EG0.edges(data=True)]
 
-elif metric in ("Activity", "Excess canalization"):
-    # Use structural graph
+elif metric == "Activity":
     special = detect_special_nodes(bn, SG)
     nodes_order, pos = circular_positions(SG)
     pos = {n: pos[n] for n in nodes_order}
 
-    if metric == "Activity":
-        # Node values based on edges with value > threshold
-        node_vals = {n: 0.0 for n in SG.nodes()}
-        for (u, v), val in edge_activity.items():
-            if val > thr:
-                node_vals[u] += max(0.0, val)
-
-        # isolated nodes after threshold for activity
-        isolated = isolated_nodes_after_threshold(SG, edge_values=edge_activity, thr=thr)
-
-        g, max_val = build_graphviz_structural(
-            SG, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
-        )
-        add_edges_structural(g, SG, edge_activity, act_min, act_max, thr=thr)
-        cbar_label = "Sum of outgoing activity"
-
-        # histogram data: all activity values
-        weights = list(edge_activity.values())
-
-    else:  # Excess canalization
-        node_vals = {n: 0.0 for n in SG.nodes()}
-        for (u, v), val in edge_excess.items():
-            if val > thr:
-                node_vals[u] += max(0.0, val)
-
-        # isolated nodes after threshold for excess
-        isolated = isolated_nodes_after_threshold(SG, edge_values=edge_excess, thr=thr)
-
-        g, max_val = build_graphviz_structural(
-            SG, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
-        )
-        add_edges_structural(g, SG, edge_excess, ex_min, ex_max, thr=thr)
-        cbar_label = "Sum of outgoing excess canalization"
-
-        # histogram data: all excess values
-        weights = list(edge_excess.values())
-
-
-# -------------------- Description --------------------
-st.markdown(f"### {bn.name}")
-
-<<<<<<< HEAD
-if metric == "Edge effectiveness":
-    desc = (
-        "Edges with value ≤ threshold are removed; "
-        "nodes are colored by effective out-degree computed from remaining edges."
+    node_vals = node_values_from_thresholded_structural(
+        SG, edge_activity, thr, degree_mode=degree_mode
     )
-elif metric == "Activity":
-    desc = (
-        "Nodes and edges are styled by input activity: edges with activity ≤ threshold are removed, "
-        "thicker edges indicate higher remaining activity, and node color reflects the sum of "
-        "outgoing activity over edges above the threshold. Nodes with no incoming or outgoing "
-        "edges after thresholding are outlined in gray."
-    )
-else:  # Excess canalization
-    desc = (
-        "Nodes and edges are styled by excess canalization (edge effectiveness − activity): "
-        "edges with excess ≤ threshold are removed, thicker edges indicate larger remaining excess, "
-        "and node color reflects the sum of outgoing excess over edges above the threshold. "
-        "Nodes with no incoming or outgoing edges after thresholding are outlined in gray."
-    )
+    isolated = isolated_nodes_after_threshold(SG, edge_values=edge_activity, thr=thr)
 
-=======
->>>>>>> 94ed627 (version 1.1)
+    g, max_val = build_graphviz_structural(
+        SG, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
+    )
+    add_edges_structural(
+        g, SG, edge_activity, act_min, act_max, pos, thr=thr,
+        show_zero_dashed_at_zero_threshold=True,
+        signed_color=False,
+        threshold_on_abs=False,
+        negative_dashed=False
+    )
+    cbar_label = f"Sum of {degree_mode.lower()} activity"
+
+    weights = list(edge_activity.values())
+
+elif metric == "Excess canalization":
+    special = detect_special_nodes(bn, SG)
+    nodes_order, pos = circular_positions(SG)
+    pos = {n: pos[n] for n in nodes_order}
+
+    node_vals = node_values_from_thresholded_structural(
+        SG, edge_excess, thr, degree_mode=degree_mode
+    )
+    isolated = isolated_nodes_after_threshold(SG, edge_values=edge_excess, thr=thr)
+
+    g, max_val = build_graphviz_structural(
+        SG, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
+    )
+    add_edges_structural(
+        g, SG, edge_excess, ex_min, ex_max, pos, thr=thr,
+        show_zero_dashed_at_zero_threshold=False,
+        signed_color=False,
+        threshold_on_abs=False,
+        negative_dashed=False
+    )
+    cbar_label = f"Sum of {degree_mode.lower()} excess canalization"
+
+    weights = list(edge_excess.values())
+
+else:
+    special = detect_special_nodes(bn, SG_corr)
+    nodes_order, pos = circular_positions(SG_corr)
+    pos = {n: pos[n] for n in nodes_order}
+
+    node_vals = node_values_from_thresholded_structural(
+        SG_corr, edge_corr, thr, degree_mode=degree_mode, use_abs=True
+    )
+    isolated = isolated_nodes_after_threshold(SG_corr, edge_values=edge_corr, thr=thr, use_abs=True)
+
+    g, max_val = build_graphviz_structural(
+        SG_corr, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
+    )
+    add_edges_structural(
+        g, SG_corr, edge_corr, corr_abs_min, corr_abs_max, pos, thr=thr,
+        show_zero_dashed_at_zero_threshold=True,
+        signed_color=True,
+        threshold_on_abs=True,
+        negative_dashed=True
+    )
+    cbar_label = f"Sum of |{degree_mode.lower()} correlation|"
+
+    weights = list(edge_corr.values())
+
+
+st.markdown(f"### {bn_name}")
+st.caption(f"Source: {source_label}")
+
 st.markdown(
     """
     <style>
@@ -1185,21 +1449,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-<<<<<<< HEAD
-# -------------------- Layout: graph left, legend + histogram right --------------------
-c1, c2 = st.columns([3.0, 1.0], gap="small")
-=======
 c1, c2 = st.columns([3.0, 1.05], gap="medium")
->>>>>>> 94ed627 (version 1.1)
 
 with c1:
     st.graphviz_chart(g, use_container_width=True)
 
 with c2:
-<<<<<<< HEAD
-    # Legend (colorbar)
-    st.pyplot(colorbar_figure(max_val, cbar_label))
-=======
     st.markdown(
         """
         <div class="dashboard-side-card">
@@ -1210,9 +1465,7 @@ with c2:
     )
 
     render_graph_legend(metric, thr, degree_mode, max_val)
->>>>>>> 94ed627 (version 1.1)
 
-    # Histogram directly below legend, same column width
     if weights:
         st.markdown(
             """
@@ -1222,42 +1475,6 @@ with c2:
             unsafe_allow_html=True
         )
 
-<<<<<<< HEAD
-        if metric == "Edge effectiveness":
-            ax2.set_title("Edge effectiveness (all edges)", fontsize=8)
-            ax2.set_xlabel("Effectiveness")
-        elif metric == "Activity":
-            ax2.set_title("Edge activity (all edges)", fontsize=8)
-            ax2.set_xlabel("Activity")
-        else:
-            ax2.set_title("Edge excess canalization (all edges)", fontsize=8)
-            ax2.set_xlabel("Excess canalization")
-
-        ax2.set_ylabel("Count")
-        st.pyplot(fig2)
-
-# -------------------- Node schemata + canalization map section --------------------
-st.markdown(f"### Node schematas and canalization map for `{selected_node_name}`")
-
-# F' / F'' schematas
-schemata_fig = plot_schemata(selected_node)
-st.pyplot(schemata_fig)
-plt.close(schemata_fig)
-
-# Canalization map (single-node CM)
-st.markdown("#### Canalization map")
-
-try:
-    CM = selected_node.canalizing_map(bound='upper')
-except TypeError:
-    # fallback if this version of CANA does not take 'bound'
-    CM = selected_node.canalizing_map()
-
-CM_gv = draw_canalizing_map_graphviz(CM)
-
-# If CM_gv is a graphviz.Source or Digraph, this works:
-st.graphviz_chart(CM_gv)
-=======
         fig2, ax2 = plt.subplots(figsize=(4.2, 3.35))
 
         if metric == "Correlation":
@@ -1421,4 +1638,3 @@ with cmap_col:
         )
     except Exception as e:
         st.warning(f"Could not draw the canalization map for this node: {e}")
->>>>>>> 94ed627 (version 1.1)
