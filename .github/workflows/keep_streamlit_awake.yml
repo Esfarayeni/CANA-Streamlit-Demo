@@ -2,10 +2,8 @@ name: Keep Streamlit App Awake
 
 on:
   schedule:
-    # Run every 6 hours
     - cron: "0 */6 * * *"
 
-  # Allows you to run it manually from GitHub
   workflow_dispatch:
 
 jobs:
@@ -13,6 +11,57 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Ping Streamlit app
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Selenium
+        run: pip install selenium
+
+      - name: Visit Streamlit app
         run: |
-          curl -L --fail --retry 3 https://cana-demo.streamlit.app/
+          python <<'PY'
+          import time
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.common.by import By
+
+          URL = "https://cana-demo.streamlit.app/"
+
+          options = Options()
+          options.add_argument("--headless=new")
+          options.add_argument("--no-sandbox")
+          options.add_argument("--disable-dev-shm-usage")
+          options.add_argument("--window-size=1920,1080")
+
+          driver = webdriver.Chrome(options=options)
+
+          try:
+              print("Opening Streamlit app...")
+              driver.get(URL)
+              time.sleep(10)
+
+              print("Page title:", driver.title)
+              print("Current URL:", driver.current_url)
+
+              # If Streamlit shows its sleeping page, try to wake it
+              buttons = driver.find_elements(By.TAG_NAME, "button")
+
+              for button in buttons:
+                  text = button.text.lower()
+
+                  if (
+                      "get this app back up" in text
+                      or "wake" in text
+                  ):
+                      print("App is sleeping. Clicking wake-up button...")
+                      button.click()
+                      time.sleep(30)
+                      break
+
+              print("Streamlit app visit completed successfully.")
+
+          finally:
+              driver.quit()
+          PY
