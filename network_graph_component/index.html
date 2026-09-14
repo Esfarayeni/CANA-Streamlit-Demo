@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+      #network-graph { position: relative; width: 100%; min-height: 480px; }
+      #network-graph svg { display: block; width: 100%; height: 100%; margin: 0 auto; }
+      #network-graph g.node { cursor: pointer; transition: opacity 160ms ease; }
+      #network-graph g.node:focus { outline: none; }
+      #network-graph g.node:focus-visible ellipse {
+        stroke: #f59e0b !important;
+        stroke-width: 6px !important;
+        filter: drop-shadow(0 0 3px rgba(245, 158, 11, 0.65));
+      }
+      #network-graph g.edge { transition: opacity 160ms ease; }
+      #network-graph g.node.dimmed, #network-graph g.edge.dimmed { opacity: 0.13; }
+      #network-graph g.node.focused ellipse { stroke: #0f172a !important; stroke-width: 6px !important; }
+      #network-graph g.node.neighbor ellipse { stroke: #2563eb !important; stroke-width: 5px !important; stroke-dasharray: 5 3; }
+      #network-graph g.edge.connected path { stroke: #2563eb !important; stroke-width: 3px !important; }
+      #network-graph g.edge.connected polygon { fill: #2563eb !important; stroke: #2563eb !important; }
+      #network-graph g.edge.incoming path { stroke: #be123c !important; stroke-dasharray: 8 4; }
+      #network-graph g.edge.incoming polygon { fill: #be123c !important; stroke: #be123c !important; }
+      #network-graph g.edge.outgoing path { stroke: #0891b2 !important; }
+      #network-graph g.edge.outgoing polygon { fill: #0891b2 !important; stroke: #0891b2 !important; }
+      #network-graph g.edge.incoming.outgoing path { stroke: #be123c !important; }
+      #network-graph g.edge.incoming.outgoing polygon { fill: #be123c !important; stroke: #be123c !important; }
+    </style>
+  </head>
+  <body>
+    <div id="network-graph"></div>
+    <script>
+      const host = document.getElementById("network-graph");
+      const parentOrigin = (() => {
+        try { return new URL(document.referrer).origin; } catch (_) { return "*"; }
+      })();
+      let lastLocalFocusId = "";
+      let lastContextId = "";
+      let lastFrameHeight = 0;
+
+      function sendMessage(type, payload) {
+        window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, parentOrigin);
+      }
+
+      function setFrameHeight(height) {
+        sendMessage("streamlit:setFrameHeight", { height });
+      }
+
+      function setComponentValue(value) {
+        sendMessage("streamlit:setComponentValue", { value });
+      }
+
+      function sanitizeSvg(markup) {
+        const parsed = new DOMParser().parseFromString(markup || "", "image/svg+xml");
+        if (parsed.querySelector("parsererror") || parsed.documentElement.tagName.toLowerCase() !== "svg") {
+          return "";
+        }
+        parsed.querySelectorAll("script, foreignObject, iframe, object, embed").forEach((element) => element.remove());
+        parsed.querySelectorAll("*").forEach((element) => {
+          [...element.attributes].forEach((attribute) => {
+            const name = attribute.name.toLowerCase();
+            const value = attribute.value.trim();
+            if (name.startsWith("on")) element.removeAttribute(attribute.name);
+            if ((name === "href" || name.endsWith(":href")) && value && !value.startsWith("#")) {
+              element.removeAttribute(attribute.name);
+            }
+          });
+        });
+        return parsed.documentElement.outerHTML;
+      }
+
+      function updateFrameHeight() {
+        const width = document.documentElement.clientWidth || host.clientWidth || 650;
+        const height = Math.max(480, Math.min(760, Math.round(width * 0.92)));
+        if (Math.abs(height - lastFrameHeight) < 2) return;
+        lastFrameHeight = height;
+        host.style.height = `${height}px`;
+        setFrameHeight(height);
+      }
+
+      function render(args) {
+        const contextId = String(args.context_id || "");
+        if (contextId !== lastContextId) {
+          lastLocalFocusId = "";
+          lastContextId = contextId;
+        }
+        host.innerHTML = sanitizeSvg(args.svg);
+        const svgRoot = host.querySelector("svg");
+        if (svgRoot) {
+          svgRoot.setAttribute("role", "group");
+          svgRoot.setAttribute("aria-label", "Interactive Boolean network. Tab to a node and press Enter or Space to select it.");
+        }
+        const nodes = [...host.querySelectorAll("g.node")];
+        const edges = [...host.querySelectorAll("g.edge")];
+        let focusedNodeId = null;
+
+        [...nodes, ...edges].forEach((element) => {
+          const title = element.querySelector("title");
+          element.dataset.graphId = title ? title.textContent.trim() : "";
+        });
+        host.querySelectorAll("title").forEach((title) => title.remove());
+        const nodeLabels = new Map(nodes.map((node) => [
+          node.dataset.graphId,
+          [...node.querySelectorAll("text")].map((text) => text.textContent.trim()).filter(Boolean).join(" ") || node.dataset.graphId,
+        ]));
+        nodes.forEach((node) => {
+          node.setAttribute("role", "button");
+          node.setAttribute("tabindex", "0");
+          node.setAttribute(
+            "aria-label",
+            `Node ${nodeLabels.get(node.dataset.graphId)}. Press Enter or Space to select.`,
+          );
+        });
+        edges.forEach((edge) => {
+          const [source, target] = edgeEndpoints(edge);
+          edge.setAttribute(
+            "aria-label",
+            `Edge from ${nodeLabels.get(source) || source} to ${nodeLabels.get(target) || target}`,
+          );
+        });
+
+        function graphId(element) {
+          return element.dataset.graphId || "";
+        }
+
+        function edgeEndpoints(edge) {
+          const parts = graphId(edge).split("->");
+          return parts.length === 2
+            ? parts.map((part) => part.trim().replace(/:(n|ne|e|se|s|sw|w|nw|c|_)$/i, ""))
+            : [];
+        }
+
+        function clearFocus() {
+          focusedNodeId = null;
+          lastLocalFocusId = "";
+          nodes.forEach((node) => node.classList.remove("dimmed", "focused", "neighbor"));
+          nodes.forEach((node) => node.removeAttribute("aria-current"));
+          edges.forEach((edge) => edge.classList.remove(
+            "dimmed", "connected", "incoming", "outgoing"
+          ));
+        }
+
+        function focusNode(node) {
+          const nodeId = graphId(node);
+          if (!nodeId) return;
+
+          focusedNodeId = nodeId;
+          lastLocalFocusId = nodeId;
+          const relatedIds = new Set([nodeId]);
+          const relatedEdges = new Set();
+          edges.forEach((edge) => {
+            const [source, target] = edgeEndpoints(edge);
+            if (source === nodeId || target === nodeId) {
+              relatedIds.add(source);
+              relatedIds.add(target);
+              relatedEdges.add(edge);
+            }
+          });
+
+          nodes.forEach((item) => {
+            const isFocused = graphId(item) === nodeId;
+            item.classList.toggle("focused", isFocused);
+            item.classList.toggle("neighbor", !isFocused && relatedIds.has(graphId(item)));
+            item.classList.toggle("dimmed", !relatedIds.has(graphId(item)));
+            if (isFocused) item.setAttribute("aria-current", "true");
+            else item.removeAttribute("aria-current");
+          });
+          edges.forEach((edge) => {
+            const [source, target] = edgeEndpoints(edge);
+            const isConnected = relatedEdges.has(edge);
+            edge.classList.toggle("connected", isConnected);
+            edge.classList.toggle("dimmed", !isConnected);
+            edge.classList.toggle("incoming", target === nodeId);
+            edge.classList.toggle("outgoing", source === nodeId);
+          });
+        }
+
+        function selectNode(node, event) {
+          event.stopPropagation();
+          focusNode(node);
+          const eventId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+          setComponentValue({ node_id: graphId(node), event_id: eventId });
+        }
+
+        nodes.forEach((node) => {
+          node.addEventListener("click", (event) => selectNode(node, event));
+          node.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              selectNode(node, event);
+            }
+          });
+        });
+        host.querySelector("svg")?.addEventListener("click", clearFocus);
+
+        const requestedFocusId = lastLocalFocusId || String(args.focused_node_id || "");
+        const selectedNode = nodes.find((node) => graphId(node) === requestedFocusId);
+        if (selectedNode) focusNode(selectedNode);
+        requestAnimationFrame(updateFrameHeight);
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        if (parentOrigin !== "*" && event.origin !== parentOrigin) return;
+        if (event.data?.type === "streamlit:render") render(event.data.args || {});
+      });
+      window.addEventListener("resize", updateFrameHeight);
+      sendMessage("streamlit:componentReady", { apiVersion: 1 });
+    </script>
+  </body>
+</html>

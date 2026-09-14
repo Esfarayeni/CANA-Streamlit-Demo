@@ -4,10 +4,13 @@
 import os
 import io
 import base64
+import hashlib
+import json
 import math
 import re
 import tempfile
 from copy import copy
+from html import escape, unescape
 
 import numpy as np
 import matplotlib as mpl
@@ -18,7 +21,9 @@ from matplotlib.collections import PatchCollection
 from matplotlib.text import Text
 
 import streamlit as st
+import streamlit.components.v1 as components
 import graphviz
+import requests
 
 from cana.boolean_network import BooleanNetwork as BN
 from cana.datasets.bio import load_all_cell_collective_models
@@ -35,6 +40,15 @@ NODE_PENWIDTH = 3.5
 FONT_SIZE     = "10"
 ARROWSIZE     = "0.7"
 PENWIDTH_MAX  = 2.5
+
+# Uploaded models are intentionally bounded because several CANA analyses scale
+# exponentially with a node's input count.
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_UPLOAD_NODES = 500
+MAX_UPLOAD_EDGES = 5_000
+MAX_UPLOAD_NODE_INPUTS = 18
+MAX_CORRELATION_INPUTS = 16
+SESSION_CACHE_MAX_ENTRIES = 24
 
 # Edge width range for structural metrics
 MIN_WIDTH = 0.5
@@ -53,10 +67,32 @@ ZERO_EDGE_STYLE     = "dashed"
 cmap = LinearSegmentedColormap.from_list('custom', ['white', '#d62728'])
 cmap.set_under('#2ca02c')  # nodes with zero value → green
 
+NETWORK_GRAPH_COMPONENT = components.declare_component(
+    "network_graph_component",
+    path=os.path.join(os.path.dirname(__file__), "network_graph_component"),
+)
+
 
 # -------------------- Helpers --------------------
 def _norm(s: str) -> str:
     return str(s).strip().lower()
+
+
+def session_cached(namespace, key, factory):
+    """Small per-session cache for mutable CANA-derived results."""
+    cache = st.session_state.setdefault(namespace, {})
+    if key not in cache:
+        if len(cache) >= SESSION_CACHE_MAX_ENTRIES:
+            cache.pop(next(iter(cache)))
+        cache[key] = factory()
+    return cache[key]
+
+
+def model_cache_key(source_label, model_name, uploaded_bytes=None):
+    if uploaded_bytes is not None:
+        digest = hashlib.sha256(uploaded_bytes).hexdigest()
+        return f"upload:{digest}"
+    return f"builtin:{source_label}:{model_name}"
 
 
 def get_bn_display_name(bn, fallback="Boolean Network"):
@@ -146,7 +182,7 @@ def load_extra_bio_models():
     return loaded, failed
 
 
-@st.cache_resource(show_spinner=True)
+@st.cache_resource(show_spinner=True, ttl=60 * 60, max_entries=8)
 def load_uploaded_cnet_from_bytes(file_bytes: bytes, filename: str):
     suffix = os.path.splitext(filename)[1] if filename else ".txt"
     if not suffix:
@@ -164,6 +200,37 @@ def load_uploaded_cnet_from_bytes(file_bytes: bytes, filename: str):
             os.remove(tmp_path)
         except Exception:
             pass
+
+
+def validate_uploaded_network(bn):
+    """Reject uploaded networks that exceed safe interactive-analysis limits."""
+    node_count = len(getattr(bn, "nodes", []) or [])
+    if node_count == 0:
+        raise ValueError("The uploaded model does not contain any nodes.")
+    if node_count > MAX_UPLOAD_NODES:
+        raise ValueError(
+            f"This model contains {node_count:,} nodes; the interactive limit is "
+            f"{MAX_UPLOAD_NODES:,}."
+        )
+
+    structural_graph = bn.structural_graph()
+    edge_count = structural_graph.number_of_edges()
+    if edge_count > MAX_UPLOAD_EDGES:
+        raise ValueError(
+            f"This model contains {edge_count:,} edges; the interactive limit is "
+            f"{MAX_UPLOAD_EDGES:,}."
+        )
+
+    widest_node = max(
+        getattr(node, "k", len(getattr(node, "inputs", []) or []))
+        for node in bn.nodes
+    ) if bn.nodes else 0
+    if widest_node > MAX_UPLOAD_NODE_INPUTS:
+        raise ValueError(
+            f"A node has {widest_node} inputs; the interactive limit is "
+            f"{MAX_UPLOAD_NODE_INPUTS}."
+        )
+    return structural_graph
 
 
 def build_model_registry():
@@ -187,6 +254,142 @@ def build_model_registry():
         }
 
     return registry, failed_extra
+
+
+CELL_COLLECTIVE_DASHBOARD_URL = "https://research.cellcollective.org/research/dashboard/"
+CELL_COLLECTIVE_MODEL_URL = "https://research.cellcollective.org/web/api/model/{}"
+MODEL_METADATA_PATH = os.path.join(os.path.dirname(__file__), "model_metadata.json")
+
+
+def _cell_collective_dashboard_payload(page_text):
+    """Extract the model catalogue embedded in the public dashboard page."""
+    marker = 'const data = {"published":'
+    start = page_text.find(marker)
+    if start < 0:
+        raise ValueError("Cell Collective catalogue payload was not found.")
+    return json.JSONDecoder().raw_decode(page_text[start + len("const data = "):])[0]
+
+
+def _model_references(version):
+    """Return the ordered public references linked to a model version."""
+    references = version.get("referenceMap") or {}
+    model_references = version.get("modelReferenceMap") or {}
+    ordered = sorted(
+        model_references.values(),
+        key=lambda item: (item.get("position", float("inf")), item.get("referenceId", float("inf"))),
+    )
+    collected = []
+    for item in ordered:
+        reference = references.get(str(item.get("referenceId")))
+        if not reference:
+            continue
+        citation = unescape(str(reference.get("text") or reference.get("shortCitation") or ""))
+        citation = re.sub(r"<[^>]+>", " ", citation)
+        citation = re.sub(r"\s+", " ", citation).strip()
+        title = unescape(str(
+            reference.get("title") or reference.get("articleTitle") or reference.get("publicationTitle") or ""
+        ))
+        title = re.sub(r"<[^>]+>", " ", title)
+        title = re.sub(r"\s+", " ", title).strip()
+        pmid = str(reference.get("pmid") or "").strip()
+        doi = str(reference.get("doi") or "").strip()
+        url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else (f"https://doi.org/{doi}" if doi else None)
+        collected.append({
+            "citation": citation or "Reference",
+            "title": title,
+            "url": url,
+            "pmid": pmid or None,
+            "doi": doi or None,
+        })
+    return collected
+
+
+def _primary_model_reference(version):
+    """Return the first/primary public paper linked to a model version."""
+    references = _model_references(version)
+    return references[0] if references else None
+
+
+@st.cache_data(show_spinner=False)
+def load_local_model_metadata():
+    """Load the checked-in Cell Collective metadata catalogue, when available."""
+    try:
+        with open(MODEL_METADATA_PATH, encoding="utf-8") as metadata_file:
+            payload = json.load(metadata_file)
+        models = payload.get("models", {})
+        return models if isinstance(models, dict) else {}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def format_primary_citation(citation, paper_title=""):
+    """Escape a citation and emphasize its paper title when it can be identified."""
+    citation = str(citation or "")
+    title = str(paper_title or "").strip()
+
+    if title:
+        title_start = citation.lower().find(title.lower())
+        if title_start >= 0:
+            title_end = title_start + len(title)
+            return (
+                f"{escape(citation[:title_start])}"
+                f'<strong class="primary-paper-title">{escape(citation[title_start:title_end])}</strong>'
+                f"{escape(citation[title_end:])}"
+            )
+
+    first_period = citation.find(".")
+    second_period = citation.find(".", first_period + 1) if first_period >= 0 else -1
+    if second_period > first_period + 1:
+        title_start = first_period + 1
+        title_end = second_period
+        candidate = citation[title_start:title_end].strip()
+        if len(candidate) >= 8:
+            before = citation[:title_start]
+            after = citation[title_end:]
+            return (
+                f"{escape(before)}"
+                f'<strong class="primary-paper-title">{escape(candidate)}</strong>'
+                f"{escape(after)}"
+            )
+
+    return escape(citation)
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_live_cell_collective_source_info(model_name):
+    """Fetch the public model page and linked paper when local metadata is absent."""
+    try:
+        response = requests.get(CELL_COLLECTIVE_DASHBOARD_URL, params={"search": model_name}, timeout=20)
+        response.raise_for_status()
+        matches = _cell_collective_dashboard_payload(response.text).get("searchResults", {}).get("data", [])
+        model = next(
+            (
+                item for item in matches
+                if _norm(item.get("name")).rstrip(".") == _norm(model_name).rstrip(".")
+            ),
+            None,
+        )
+        if model is None:
+            return {"error": "The selected model was not found in the public Cell Collective catalogue."}
+
+        detail_response = requests.get(CELL_COLLECTIVE_MODEL_URL.format(model["id"]), timeout=20)
+        detail_response.raise_for_status()
+        versions = detail_response.json().get("data", {}).get("versions") or []
+        version = next((item for item in versions if item.get("default")), versions[0] if versions else {})
+        return {
+            "model_url": f"https://research.cellcollective.org/dashboard#module/{model['id']}:1",
+            "primary_reference": _primary_model_reference(version),
+        }
+    except (requests.RequestException, ValueError, KeyError, TypeError) as error:
+        return {"error": str(error)}
+
+
+def load_cell_collective_source_info(model_name):
+    """Prefer checked-in metadata; retain the public API as a resilient fallback."""
+    local_record = load_local_model_metadata().get(model_name)
+    if isinstance(local_record, dict) and local_record.get("model_url"):
+        return local_record
+    return load_live_cell_collective_source_info(model_name)
 
 
 def detect_special_nodes(bn, G):
@@ -226,6 +429,130 @@ def detect_special_nodes(bn, G):
                 tmp.append(n)
         special_nodes = set(tmp)
     return special_nodes
+
+
+def render_hoverable_network_graph(graph):
+    """Render Graphviz SVG with click-to-focus neighbor highlighting."""
+    svg = graph.pipe(format="svg").decode("utf-8")
+    svg = re.sub(r"<\?xml[^>]*\?>", "", svg, flags=re.IGNORECASE)
+    svg = re.sub(r"<!DOCTYPE[^>]*>", "", svg, flags=re.IGNORECASE).strip()
+
+    components.html(
+        f"""
+        <style>
+          html, body {{ height: 100%; margin: 0; padding: 0; background: transparent; overflow: hidden; }}
+          #network-graph {{ position: relative; width: 100%; height: 100%; }}
+          #network-graph svg {{ display: block; width: 100%; height: 100%; margin: 0 auto; }}
+          #network-graph g.node {{ cursor: pointer; transition: opacity 160ms ease; }}
+          #network-graph g.edge {{ transition: opacity 160ms ease; }}
+          #network-graph g.node.dimmed, #network-graph g.edge.dimmed {{ opacity: 0.13; }}
+          #network-graph g.node.focused ellipse {{ stroke: #0f172a !important; stroke-width: 6px !important; }}
+          #network-graph g.node.neighbor ellipse {{ stroke: #2563eb !important; stroke-width: 5px !important; }}
+          #network-graph g.edge.connected path {{ stroke: #2563eb !important; stroke-width: 3px !important; }}
+          #network-graph g.edge.connected polygon {{ fill: #2563eb !important; stroke: #2563eb !important; }}
+          #network-graph g.edge.incoming path {{ stroke: #be123c !important; }}
+          #network-graph g.edge.incoming polygon {{ fill: #be123c !important; stroke: #be123c !important; }}
+          #network-graph g.edge.outgoing path {{ stroke: #0891b2 !important; }}
+          #network-graph g.edge.outgoing polygon {{ fill: #0891b2 !important; stroke: #0891b2 !important; }}
+          #network-graph g.edge.incoming.outgoing path {{ stroke: #be123c !important; }}
+          #network-graph g.edge.incoming.outgoing polygon {{ fill: #be123c !important; stroke: #be123c !important; }}
+        </style>
+        <div id="network-graph">{svg}</div>
+        <script>
+          const nodes = [...document.querySelectorAll("#network-graph g.node")];
+          const edges = [...document.querySelectorAll("#network-graph g.edge")];
+          let focusedNodeId = null;
+
+          function graphId(element) {{
+            return element.dataset.graphId || "";
+          }}
+
+          [...nodes, ...edges].forEach((element) => {{
+            const title = element.querySelector("title");
+            element.dataset.graphId = title ? title.textContent.trim() : "";
+          }});
+          document.querySelectorAll("#network-graph title").forEach((title) => title.remove());
+
+          function edgeEndpoints(edge) {{
+            const parts = graphId(edge).split("->");
+            return parts.length === 2 ? parts.map((part) => part.trim()) : [];
+          }}
+
+          function clearFocus() {{
+            focusedNodeId = null;
+            nodes.forEach((node) => node.classList.remove("dimmed", "focused", "neighbor"));
+            edges.forEach((edge) => edge.classList.remove(
+              "dimmed", "connected", "incoming", "outgoing"
+            ));
+          }}
+
+          function focusNode(node) {{
+            const nodeId = graphId(node);
+            if (!nodeId || focusedNodeId === nodeId) {{
+              clearFocus();
+              return;
+            }}
+
+            focusedNodeId = nodeId;
+            const relatedIds = new Set([nodeId]);
+            const relatedEdges = new Set();
+            edges.forEach((edge) => {{
+              const [source, target] = edgeEndpoints(edge);
+              if (source === nodeId || target === nodeId) {{
+                relatedIds.add(source);
+                relatedIds.add(target);
+                relatedEdges.add(edge);
+              }}
+            }});
+
+            nodes.forEach((item) => {{
+              const isFocused = graphId(item) === nodeId;
+              item.classList.toggle("focused", isFocused);
+              item.classList.toggle("neighbor", !isFocused && relatedIds.has(graphId(item)));
+              item.classList.toggle("dimmed", !relatedIds.has(graphId(item)));
+            }});
+            edges.forEach((edge) => {{
+              const [source, target] = edgeEndpoints(edge);
+              const isConnected = relatedEdges.has(edge);
+              edge.classList.toggle("connected", isConnected);
+              edge.classList.toggle("dimmed", !isConnected);
+              edge.classList.toggle("incoming", target === nodeId);
+              edge.classList.toggle("outgoing", source === nodeId);
+            }});
+          }}
+
+          nodes.forEach((node) => {{
+            node.addEventListener("click", (event) => {{
+              event.stopPropagation();
+              focusNode(node);
+            }});
+          }});
+          document.querySelector("#network-graph svg").addEventListener("click", clearFocus);
+        </script>
+        """,
+        height=650,
+        scrolling=False,
+    )
+
+
+def render_clickable_network_graph(graph, focused_node_id, context_id):
+    """Render the network component and return the most recent click event."""
+    svg = graphviz_svg_from_source(graph.source, graph.engine)
+    return NETWORK_GRAPH_COMPONENT(
+        svg=svg,
+        focused_node_id=str(focused_node_id or ""),
+        context_id=str(context_id or ""),
+        key="network-graph-component",
+        default={},
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def graphviz_svg_from_source(source, engine="dot"):
+    """Render and cache deterministic Graphviz source as embeddable SVG."""
+    svg = graphviz.Source(source, engine=engine).pipe(format="svg").decode("utf-8")
+    svg = re.sub(r"<\?xml[^>]*\?>", "", svg, flags=re.IGNORECASE)
+    return re.sub(r"<!DOCTYPE[^>]*>", "", svg, flags=re.IGNORECASE).strip()
 
 
 def circular_positions(G, radius=RADIUS):
@@ -432,7 +759,13 @@ def build_graphviz_effective(
         else:
             outline = DEFAULT_OUTLINE
 
-        g.node(str(n), label(n), pos=f"{x:.3f},{y:.3f}!", color=outline, fillcolor=fill)
+        g.node(
+            str(n),
+            label(n),
+            pos=f"{x:.3f},{y:.3f}!",
+            color=outline,
+            fillcolor=fill,
+        )
 
     return g, max_node_val
 
@@ -479,14 +812,48 @@ def metric_to_width(val, vmin, vmax, wmin=MIN_WIDTH, wmax=MAX_WIDTH):
     return wmin + t * (wmax - wmin)
 
 
-def compute_structural_metrics(bn):
+def _graph_node_for_reference(reference, graph, nodes_by_normalized_label):
+    """Resolve a CANA node/input reference to the matching graph node ID."""
+    candidates = [reference, getattr(reference, "id", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if candidate in graph:
+                return candidate
+        except TypeError:
+            pass
+
+    names = [getattr(reference, "name", None), str(reference)]
+    for name in names:
+        if name is not None:
+            match = nodes_by_normalized_label.get(_norm(name))
+            if match is not None:
+                return match
+    return None
+
+
+def _ordered_cana_edges(node, graph):
+    """Return graph edges in CANA's declared input order."""
+    nodes_by_label = {
+        _norm(graph.nodes[node_id].get("label", node_id)): node_id
+        for node_id in graph.nodes()
+    }
+    target = _graph_node_for_reference(node, graph, nodes_by_label)
+    if target is None:
+        return []
+
+    ordered_edges = []
+    for input_reference in list(getattr(node, "inputs", []) or []):
+        source = _graph_node_for_reference(input_reference, graph, nodes_by_label)
+        ordered_edges.append((source, target) if source is not None and graph.has_edge(source, target) else None)
+    return ordered_edges
+
+
+def compute_structural_metrics(bn, include_excess=True):
     SG = bn.structural_graph()
     if SG.number_of_nodes() == 0:
         return SG, {}, (0.0, 1.0), {}, (0.0, 1.0)
-
-    sg_label = {n: SG.nodes[n].get('label', str(n)) for n in SG.nodes()}
-    sg_label_norm = {n: _norm(lbl) for n, lbl in sg_label.items()}
-    sg_by_label_norm = {lbln: n for n, lbln in sg_label_norm.items()}
 
     edge_activity = {}
     edge_activity_vals = []
@@ -494,15 +861,9 @@ def compute_structural_metrics(bn):
     edge_excess_vals = []
 
     for node in bn.nodes:
-        name = getattr(node, "name", f"node_{getattr(node, 'id', 'X')}")
-        tgt_norm = _norm(name)
-        v = sg_by_label_norm.get(tgt_norm, None)
-        if v is None:
-            continue
-
         try:
-            eff_list = node.edge_effectiveness()
             act_list = node.activities()
+            eff_list = node.edge_effectiveness() if include_excess else None
         except Exception:
             continue
 
@@ -515,20 +876,20 @@ def compute_structural_metrics(bn):
         if len(act_list) == 0:
             continue
 
-        preds = list(SG.predecessors(v))
-        if len(preds) == 0:
-            continue
-
-        L = min(len(preds), len(act_list))
+        ordered_edges = _ordered_cana_edges(node, SG)
+        L = min(len(ordered_edges), len(act_list))
         if L == 0:
             continue
 
         for i in range(L):
+            edge = ordered_edges[i]
+            if edge is None:
+                continue
             act = act_list[i]
             if not np.isfinite(act):
                 continue
 
-            u = preds[i]
+            u, v = edge
             act_val = float(act)
             edge_activity[(u, v)] = act_val
             edge_activity_vals.append(act_val)
@@ -556,17 +917,6 @@ def compute_structural_metrics(bn):
 
 
 # ---------- Correlation metric ----------
-def generate_input_columns(k):
-    if k <= 0:
-        return np.zeros((1, 0), dtype=int)
-
-    rows = []
-    for s in range(2 ** k):
-        bits = [int(b) for b in format(s, f"0{k}b")]
-        rows.append(bits)
-    return np.array(rows, dtype=int)
-
-
 def safe_binary_corr(x, y):
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -587,25 +937,21 @@ def compute_correlation_metrics(bn):
     if SG.number_of_nodes() == 0:
         return SG, {}, (0.0, 1.0)
 
-    sg_label = {n: SG.nodes[n].get('label', str(n)) for n in SG.nodes()}
-    sg_label_norm = {n: _norm(lbl) for n, lbl in sg_label.items()}
-    sg_by_label_norm = {lbln: n for n, lbln in sg_label_norm.items()}
-
     edge_corr = {}
     corr_abs_vals = []
 
     for node in bn.nodes:
-        name = getattr(node, "name", f"node_{getattr(node, 'id', 'X')}")
-        tgt_norm = _norm(name)
-        v = sg_by_label_norm.get(tgt_norm, None)
-        if v is None:
-            continue
-
         inputs = list(getattr(node, "inputs", []) or [])
         k = getattr(node, "k", len(inputs))
 
         if k <= 0 or len(inputs) == 0:
             continue
+        if k > MAX_CORRELATION_INPUTS:
+            name = getattr(node, "name", f"node_{getattr(node, 'id', 'X')}")
+            raise ValueError(
+                f"Correlation is limited to {MAX_CORRELATION_INPUTS} inputs per node; "
+                f"{name} has {k}."
+            )
 
         outputs = getattr(node, "outputs", None)
         if outputs is None:
@@ -615,13 +961,15 @@ def compute_correlation_metrics(bn):
         if outputs.size != 2 ** k:
             continue
 
-        input_table = generate_input_columns(k)
-        preds = list(SG.predecessors(v))
-
-        L = min(len(preds), k, input_table.shape[1])
+        ordered_edges = _ordered_cana_edges(node, SG)
+        row_ids = np.arange(outputs.size, dtype=np.uint64)
+        L = min(len(ordered_edges), k)
         for i in range(L):
-            u = preds[i]
-            col = input_table[:, i]
+            edge = ordered_edges[i]
+            if edge is None:
+                continue
+            u, v = edge
+            col = ((row_ids >> np.uint64(k - i - 1)) & np.uint64(1)).astype(float)
             corr = safe_binary_corr(col, outputs)
             edge_corr[(u, v)] = corr
             corr_abs_vals.append(abs(corr))
@@ -682,7 +1030,13 @@ def build_graphviz_structural(SG, node_values, special_nodes_set, positions, nod
         else:
             outline = DEFAULT_OUTLINE
 
-        g.node(str(n), label(n), pos=f"{x:.3f},{y:.3f}!", color=outline, fillcolor=fill)
+        g.node(
+            str(n),
+            label(n),
+            pos=f"{x:.3f},{y:.3f}!",
+            color=outline,
+            fillcolor=fill,
+        )
     return g, max_val
 
 
@@ -883,7 +1237,7 @@ def clean_svg_for_panel(svg_text):
         )
     else:
         svg_text = re.sub(
-            r'<svg',
+            r'<svg\b',
             '<svg preserveAspectRatio="xMidYMid meet"',
             svg_text,
             count=1
@@ -891,13 +1245,22 @@ def clean_svg_for_panel(svg_text):
 
     if 'class="canalization-map-svg"' not in svg_text:
         svg_text = re.sub(
-            r'<svg',
+            r'<svg\b',
             '<svg class="canalization-map-svg"',
             svg_text,
             count=1
         )
 
     return svg_text
+
+
+def format_node_parameter(metric_fn):
+    """Return a consistently formatted node metric, or an em dash when unavailable."""
+    try:
+        value = float(metric_fn())
+        return f"{value:.2f}" if np.isfinite(value) else "—"
+    except Exception:
+        return "—"
 
 
 # ---------- Schemata plotting ----------
@@ -1176,6 +1539,41 @@ def plot_schemata(n):
     return fig
 
 
+def render_schemata_png(node):
+    """Render one node's schemata once and return a base64 PNG payload."""
+    figure = plot_schemata(node)
+    buffer = io.BytesIO()
+    try:
+        figure.savefig(
+            buffer,
+            format="png",
+            bbox_inches="tight",
+            pad_inches=0.35,
+            dpi=200,
+            facecolor="white",
+        )
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    finally:
+        plt.close(figure)
+
+
+def render_canalization_map_svg(node):
+    """Render one node's canalization map and return its payload and size class."""
+    try:
+        canalization_map = node.canalizing_map(bound="upper")
+    except TypeError:
+        canalization_map = node.canalizing_map()
+
+    graph = draw_canalizing_map_graphviz(canalization_map)
+    graph.graph_attr.update({"pad": "0.02", "margin": "0.0", "ratio": "compress"})
+    svg = clean_svg_for_panel(graphviz_svg_from_source(graph.source, graph.engine))
+    try:
+        schemata_count = len(node.schemata_look_up_table())
+    except Exception:
+        schemata_count = 3
+    return base64.b64encode(svg.encode("utf-8")).decode("utf-8"), schemata_count
+
+
 # -------------------- UI --------------------
 registry, failed_extra = build_model_registry()
 all_model_names = sorted(list(registry.keys()), key=lambda x: x.lower())
@@ -1187,10 +1585,36 @@ st.sidebar.image(
     width=120,
 )
 
+with st.sidebar.expander("Quick guide", expanded=False):
+    st.markdown(
+        """
+        <style>
+        .quick-guide-credit {
+            margin-top: 0.85rem;
+            color: #64748b;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 0.80rem;
+            font-style: italic;
+        }
+        .quick-guide-credit a { color: #1667b7; }
+        .st-key-node-selector-panel { min-height: 76px; }
+        </style>
+        Explore Boolean-network models through their regulatory structure, Boolean logic, and canalization properties.
+        <p>Select a Cell Collective model or upload a <code>.cnet</code> file, adjust the threshold, and click a node to examine its regulators,
+        targets, Boolean schemata, canalization map, and node-level parameters.</p>
+        <div class="quick-guide-credit">
+          Developed at <a href="https://casci.binghamton.edu/casci.php" target="_blank" rel="noopener noreferrer">CASCI Lab</a>
+          &nbsp;·&nbsp; Built with <a href="https://github.com/CASCI-lab/CANA" target="_blank" rel="noopener noreferrer">CANA</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 uploaded_cnet = st.sidebar.file_uploader(
     "Upload a .cnet  Boolean network file",
     type=["cnet", "txt"],
-    key="uploaded_cnet_file"
+    key="uploaded_cnet_file",
+    label_visibility="collapsed",
 )
 
 use_uploaded = uploaded_cnet is not None
@@ -1198,11 +1622,18 @@ use_uploaded = uploaded_cnet is not None
 uploaded_bn = None
 uploaded_name = None
 uploaded_error = None
+uploaded_bytes = None
 
 if use_uploaded:
     try:
         uploaded_bytes = uploaded_cnet.getvalue()
+        if len(uploaded_bytes) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"The file is {len(uploaded_bytes) / (1024 * 1024):.1f} MB; "
+                f"the interactive limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+            )
         uploaded_bn = load_uploaded_cnet_from_bytes(uploaded_bytes, uploaded_cnet.name)
+        validate_uploaded_network(uploaded_bn)
         uploaded_name = get_bn_display_name(uploaded_bn, fallback=uploaded_cnet.name)
         st.sidebar.success(f"Loaded uploaded network: {uploaded_name}")
     except Exception as e:
@@ -1210,11 +1641,8 @@ if use_uploaded:
         st.sidebar.error("Could not load the uploaded CNET file.")
         st.sidebar.caption(uploaded_error)
 
-if failed_extra:
-    with st.sidebar.expander("Extra CANA models that failed to load"):
-        for k, v in failed_extra.items():
-            st.write(f"**{k}**")
-            st.caption(v)
+if uploaded_error:
+    st.stop()
 
 selected_model_name = st.sidebar.selectbox(
     "Select model",
@@ -1251,25 +1679,50 @@ bn_name = get_bn_display_name(
     fallback=uploaded_cnet.name if (use_uploaded and uploaded_cnet is not None) else selected_model_name
 )
 
+current_model_cache_key = model_cache_key(source_label, bn_name, uploaded_bytes)
 try:
-    EG0 = bn.effective_graph()
+    SG = session_cached(
+        "_network_analysis_cache",
+        (current_model_cache_key, "structural_graph"),
+        bn.structural_graph,
+    )
 except Exception as e:
-    st.error(f"Could not build the effective graph for this network: {e}")
+    st.error(f"Could not build the structural graph for this network: {e}")
     st.stop()
 
-N = EG0.number_of_nodes()
+N = SG.number_of_nodes()
 adaptive_default = float(np.clip(3.0 / max(np.sqrt(max(N, 1)), 1.0), 0.1, 1.0))
 
-try:
-    SG, edge_activity, (act_min, act_max), edge_excess, (ex_min, ex_max) = compute_structural_metrics(bn)
-except Exception as e:
-    st.error(f"Could not compute structural metrics for this network: {e}")
-    st.stop()
+EG0 = None
+SG_corr = None
+edge_activity, edge_excess, edge_corr = {}, {}, {}
+act_min, act_max = 0.0, 1.0
+ex_min, ex_max = 0.0, 1.0
+corr_abs_min, corr_abs_max = 0.0, 1.0
 
 try:
-    SG_corr, edge_corr, (corr_abs_min, corr_abs_max) = compute_correlation_metrics(bn)
+    if metric == "Edge effectiveness":
+        EG0 = session_cached(
+            "_network_analysis_cache",
+            (current_model_cache_key, "effective_graph"),
+            bn.effective_graph,
+        )
+    elif metric in {"Activity", "Excess canalization"}:
+        include_excess = metric == "Excess canalization"
+        structural_result = session_cached(
+            "_network_analysis_cache",
+            (current_model_cache_key, "structural_metrics", include_excess),
+            lambda: compute_structural_metrics(bn, include_excess=include_excess),
+        )
+        SG, edge_activity, (act_min, act_max), edge_excess, (ex_min, ex_max) = structural_result
+    else:
+        SG_corr, edge_corr, (corr_abs_min, corr_abs_max) = session_cached(
+            "_network_analysis_cache",
+            (current_model_cache_key, "correlation"),
+            lambda: compute_correlation_metrics(bn),
+        )
 except Exception as e:
-    st.error(f"Could not compute correlation metric for this network: {e}")
+    st.error(f"Could not compute {metric.lower()} for this network: {e}")
     st.stop()
 
 if metric == "Edge effectiveness":
@@ -1295,14 +1748,12 @@ thr = st.sidebar.slider(
 node_size_in = adaptive_default
 
 node_names = [getattr(node, "name", f"node_{i}") for i, node in enumerate(bn.nodes)]
-selected_node_name = st.sidebar.selectbox(
-    "Select node for F' / F'' & canalization map",
-    node_names,
-    index=0,
-    key="node_schemata_select"
-)
-selected_node_index = node_names.index(selected_node_name)
-selected_node = bn.nodes[selected_node_index]
+selected_node_name = st.session_state.get("node_schemata_select", node_names[0])
+if selected_node_name not in node_names:
+    selected_node_name = node_names[0]
+    st.session_state["node_schemata_select"] = selected_node_name
+node_selector_panel = st.sidebar.container(key="node-selector-panel")
+node_selector_slot = node_selector_panel.empty()
 
 weights = None
 
@@ -1328,6 +1779,7 @@ if metric == "Edge effectiveness":
         isolated_nodes=isolated
     )
     add_edges_effective(g, EG0, thr, pos)
+    graph_source = EG0
     cbar_label = f"Effective {degree_mode.lower()}"
 
     weights = [float(d.get('weight', 0.0)) for _, _, d in EG0.edges(data=True)]
@@ -1352,6 +1804,7 @@ elif metric == "Activity":
         threshold_on_abs=False,
         negative_dashed=False
     )
+    graph_source = SG
     cbar_label = f"Sum of {degree_mode.lower()} activity"
 
     weights = list(edge_activity.values())
@@ -1376,6 +1829,7 @@ elif metric == "Excess canalization":
         threshold_on_abs=False,
         negative_dashed=False
     )
+    graph_source = SG
     cbar_label = f"Sum of {degree_mode.lower()} excess canalization"
 
     weights = list(edge_excess.values())
@@ -1400,13 +1854,69 @@ else:
         threshold_on_abs=True,
         negative_dashed=True
     )
+    graph_source = SG_corr
     cbar_label = f"Sum of |{degree_mode.lower()} correlation|"
 
     weights = list(edge_corr.values())
 
 
+model_node_count = SG.number_of_nodes()
+model_edge_count = SG.number_of_edges()
+model_input_node_count = len(detect_special_nodes(bn, SG))
+model_output_node_count = sum(1 for node_id in SG.nodes() if SG.out_degree(node_id) == 0)
+graph_node_name_by_id = {
+    str(node_id): str(graph_source.nodes[node_id].get("label", node_id))
+    for node_id in graph_source.nodes()
+}
+graph_focus_context = f"overview-v3|{current_model_cache_key}"
+focused_graph_node_id = (
+    st.session_state.get("_graph_focus_node_id", "")
+    if st.session_state.get("_graph_focus_context") == graph_focus_context
+    else ""
+)
+
+
 st.markdown(f"### {bn_name}")
 st.caption(f"Source: {source_label}")
+
+if source_label == "Cell Collective":
+    source_info = load_cell_collective_source_info(selected_model_name)
+    if source_info.get("error"):
+        st.caption("Primary-paper metadata is temporarily unavailable from Cell Collective.")
+    else:
+        primary_reference = source_info.get("primary_reference")
+        paper_link = ""
+        if primary_reference and primary_reference.get("url"):
+            paper_link = (
+                f'<a class="source-paper-link" href="{escape(primary_reference["url"], quote=True)}" '
+                'target="_blank" rel="noopener noreferrer">Open primary paper ↗</a>'
+            )
+        citation = primary_reference["citation"] if primary_reference else "No model-level primary paper is listed."
+        citation_html = format_primary_citation(
+            citation,
+            primary_reference.get("title", "") if primary_reference else "",
+        )
+        st.markdown(
+            f"""
+            <style>
+            .source-reference-line {{ color: #7a7f89; font-size: 0.875rem; line-height: 1.55; margin: 0.55rem 0 0.95rem; }}
+            .source-reference-line a {{ font: inherit; font-weight: 600; text-decoration: none; }}
+            .source-reference-line a:hover {{ text-decoration: underline; }}
+            .source-model-link {{ color: #1667b7; }}
+            .source-paper-link {{ color: #a14f22; }}
+            .source-reference-separator {{ color: #b4bbc5; padding: 0 0.35rem; }}
+            .primary-paper-title {{ font-weight: 750; color: #475569; }}
+            </style>
+            <div class="source-reference-line">
+              Primary paper: {citation_html}
+              <span class="source-reference-separator">·</span><a class="source-model-link" href="{escape(source_info['model_url'], quote=True)}" target="_blank" rel="noopener noreferrer">View model in Cell Collective ↗</a>
+              {f'<span class="source-reference-separator">·</span>{paper_link}' if paper_link else ''}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+elif use_uploaded:
+    st.caption("Uploaded CNET model — no external source paper is attached.")
 
 st.markdown(
     """
@@ -1418,7 +1928,8 @@ st.markdown(
         padding: 18px 18px 16px 18px;
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
     }
-    .dashboard-side-card .section-label {
+    .dashboard-side-card .section-label,
+    .st-key-network-guide .section-label {
         font-size: 0.76rem;
         font-weight: 700;
         letter-spacing: 0.08em;
@@ -1426,13 +1937,15 @@ st.markdown(
         color: #64748b;
         margin-bottom: 0.35rem;
     }
-    .dashboard-side-card .section-title {
+    .dashboard-side-card .section-title,
+    .st-key-network-guide .section-title {
         font-size: 1.02rem;
         font-weight: 700;
         color: #0f172a;
         margin-bottom: 0.8rem;
     }
-    .dashboard-side-card .divider {
+    .dashboard-side-card .divider,
+    .st-key-network-guide .divider {
         height: 1px;
         background: linear-gradient(90deg, rgba(148, 163, 184, 0.12), rgba(148, 163, 184, 0.45), rgba(148, 163, 184, 0.12));
         margin: 16px 0 14px 0;
@@ -1444,81 +1957,180 @@ st.markdown(
         padding: 12px 10px 6px 10px;
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.85);
     }
+    .network-parameters {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 0 0 14px 0;
+    }
+    .network-parameter {
+        padding: 11px 12px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 12px;
+        background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    }
+    .network-parameter-label {
+        display: block;
+        color: #64748b;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+    .network-parameter-value {
+        display: block;
+        margin-top: 3px;
+        color: #0f172a;
+        font-size: 1.35rem;
+        font-weight: 750;
+        line-height: 1.1;
+    }
+    @media (max-width: 560px) {
+        .network-parameters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 1100px) {
+        .st-key-network-display [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+        }
+        .st-key-network-display [data-testid="stColumn"] {
+            width: 100% !important;
+            min-width: 100% !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-c1, c2 = st.columns([3.0, 1.05], gap="medium")
+network_display = st.container(key="network-display")
+with network_display:
+    c1, c2 = st.columns([3.0, 1.05], gap="medium")
 
 with c1:
-    st.graphviz_chart(g, use_container_width=True)
-
-with c2:
     st.markdown(
-        """
-        <div class="dashboard-side-card">
-            <div class="section-label">Network guide</div>
-            <div class="section-title">Legend and distribution</div>
+        f"""
+        <div class="network-parameters" aria-label="Model parameters">
+          <div class="network-parameter"><span class="network-parameter-label">Nodes</span><span class="network-parameter-value">{model_node_count}</span></div>
+          <div class="network-parameter"><span class="network-parameter-label">Edges</span><span class="network-parameter-value">{model_edge_count}</span></div>
+          <div class="network-parameter"><span class="network-parameter-label">Input nodes</span><span class="network-parameter-value">{model_input_node_count}</span></div>
+          <div class="network-parameter"><span class="network-parameter-label">Output nodes</span><span class="network-parameter-value">{model_output_node_count}</span></div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
+    graph_click_event = render_clickable_network_graph(
+        g,
+        focused_graph_node_id,
+        graph_focus_context,
+    )
+    if isinstance(graph_click_event, dict):
+        click_event_id = str(graph_click_event.get("event_id", ""))
+        clicked_node_id = str(graph_click_event.get("node_id", ""))
+        clicked_node_name = graph_node_name_by_id.get(clicked_node_id)
+        if click_event_id and click_event_id != st.session_state.get("_last_graph_click_event"):
+            st.session_state["_last_graph_click_event"] = click_event_id
+            st.session_state["_graph_focus_context"] = graph_focus_context
+            st.session_state["_graph_focus_node_id"] = clicked_node_id
+            if clicked_node_name in node_names and clicked_node_name != selected_node_name:
+                st.session_state["node_schemata_select"] = clicked_node_name
+                selected_node_name = clicked_node_name
 
-    render_graph_legend(metric, thr, degree_mode, max_val)
+selected_node_name = node_selector_slot.selectbox(
+    "Select node for F' / F'' & canalization map",
+    node_names,
+    key="node_schemata_select",
+)
+selected_node_index = node_names.index(selected_node_name)
+selected_node = bn.nodes[selected_node_index]
 
-    if weights:
-        st.markdown(
-            """
-            <div class="divider"></div>
-            <div class="section-title" style="margin-bottom:10px; font-weight:800;">Edge value histogram</div>
-            """,
-            unsafe_allow_html=True
-        )
+with c2:
+    with st.container(border=True, key="network-guide"):
+        st.markdown('<div class="section-label">Network guide</div>', unsafe_allow_html=True)
+        render_graph_legend(metric, thr, degree_mode, max_val)
 
-        fig2, ax2 = plt.subplots(figsize=(4.2, 3.35))
-
-        if metric == "Correlation":
-            pos_abs = [abs(w) for w in weights if w >= 0]
-            neg_abs = [abs(w) for w in weights if w < 0]
-            bins = np.linspace(0.0, 1.0, 29)
-
-            ax2.hist(
-                [pos_abs, neg_abs],
-                bins=bins,
-                stacked=True,
-                label=["positive", "negative"]
+        if weights:
+            st.markdown(
+                """
+                <div class="divider"></div>
+                <div class="section-title" style="margin-bottom:10px; font-weight:800;">Edge value histogram</div>
+                """,
+                unsafe_allow_html=True
             )
-            ax2.axvline(abs(thr), linestyle="--", color='red', linewidth=2)
-            ax2.set_title("Edge correlation", fontsize=10, pad=10)
-            ax2.set_xlabel("|Correlation|")
-            ax2.set_xlim(0.0, 1.0)
-            ax2.legend(frameon=False, fontsize=8)
-        else:
-            ax2.hist(weights, bins=28)
-            ax2.axvline(thr, linestyle="--", color='red', linewidth=2)
 
-            if metric == "Edge effectiveness":
-                ax2.set_title("Edge effectiveness", fontsize=10, pad=10)
-                ax2.set_xlabel("Effectiveness")
-            elif metric == "Activity":
-                ax2.set_title("Edge activity", fontsize=10, pad=10)
-                ax2.set_xlabel("Activity")
-            elif metric == "Excess canalization":
-                ax2.set_title("Edge excess canalization", fontsize=10, pad=10)
-                ax2.set_xlabel("Excess canalization")
+            fig2, ax2 = plt.subplots(figsize=(4.2, 3.35))
 
-        ax2.set_ylabel("Count")
-        ax2.spines['top'].set_visible(False)
-        ax2.spines['right'].set_visible(False)
-        ax2.grid(alpha=0.18)
+            if metric == "Correlation":
+                pos_abs = [abs(w) for w in weights if w >= 0]
+                neg_abs = [abs(w) for w in weights if w < 0]
+                bins = np.linspace(0.0, 1.0, 29)
 
-        fig2.tight_layout(pad=1.1)
-        st.pyplot(fig2, use_container_width=True)
-        plt.close(fig2)
+                ax2.hist(
+                    [pos_abs, neg_abs],
+                    bins=bins,
+                    stacked=True,
+                    label=["positive", "negative"]
+                )
+                ax2.axvline(abs(thr), linestyle="--", color='red', linewidth=2)
+                ax2.set_title("Edge correlation", fontsize=10, pad=10)
+                ax2.set_xlabel("|Correlation|")
+                ax2.set_xlim(0.0, 1.0)
+                ax2.legend(frameon=False, fontsize=8)
+            else:
+                ax2.hist(weights, bins=28)
+                ax2.axvline(thr, linestyle="--", color='red', linewidth=2)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+                if metric == "Edge effectiveness":
+                    ax2.set_title("Edge effectiveness", fontsize=10, pad=10)
+                    ax2.set_xlabel("Effectiveness")
+                elif metric == "Activity":
+                    ax2.set_title("Edge activity", fontsize=10, pad=10)
+                    ax2.set_xlabel("Activity")
+                elif metric == "Excess canalization":
+                    ax2.set_title("Edge excess canalization", fontsize=10, pad=10)
+                    ax2.set_xlabel("Excess canalization")
 
-st.markdown(f"### Node schematas and canalization map for `{selected_node_name}`")
+            ax2.set_ylabel("Count")
+            ax2.spines['top'].set_visible(False)
+            ax2.spines['right'].set_visible(False)
+            ax2.grid(alpha=0.18)
+
+            fig2.tight_layout(pad=1.1)
+            st.pyplot(fig2, use_container_width=True)
+            plt.close(fig2)
+
+selected_node_cache_id = getattr(selected_node, "id", selected_node_index)
+(
+    selected_node_input_count,
+    selected_node_sensitivity,
+    selected_node_effective_connectivity,
+    selected_node_bias,
+) = session_cached(
+    "_node_analysis_cache",
+    (current_model_cache_key, selected_node_cache_id, "parameters"),
+    lambda: (
+        int(getattr(selected_node, "k", len(getattr(selected_node, "inputs", []) or []))),
+        format_node_parameter(lambda: selected_node.sensitivity(norm=True)),
+        format_node_parameter(lambda: selected_node.effective_connectivity(norm=True)),
+        format_node_parameter(selected_node.bias),
+    ),
+)
+
+st.markdown(
+    f"""
+    <div class="node-parameters-panel" aria-label="Selected node parameters">
+      <div class="node-parameters-label">Selected node parameters</div>
+      <div class="node-parameters">
+        <div class="node-parameter"><span class="node-parameter-label">Inputs</span><span class="node-parameter-value">{selected_node_input_count}</span></div>
+        <div class="node-parameter"><span class="node-parameter-label">Sensitivity</span><span class="node-parameter-value">{selected_node_sensitivity}</span></div>
+        <div class="node-parameter"><span class="node-parameter-label">Effective connectivity</span><span class="node-parameter-value">{selected_node_effective_connectivity}</span></div>
+        <div class="node-parameter"><span class="node-parameter-label">Bias</span><span class="node-parameter-value">{selected_node_bias}</span></div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(f"#### Node schematas and canalization map for `{selected_node_name}`")
 
 SQUARE_PANEL_SIZE_PX = 700
 st.markdown(
@@ -1537,6 +2149,64 @@ st.markdown(
         justify-content: center;
         padding: 18px;
         box-sizing: border-box;
+    }}
+    .node-parameters-panel {{
+        margin: 1.35rem 0 1rem;
+        padding: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 14px;
+        background: #fbfcfe;
+    }}
+    .node-parameters-label {{
+        margin-bottom: 10px;
+        color: #475569;
+        font-size: 0.78rem;
+        font-weight: 750;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }}
+    .node-parameters {{
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+    }}
+    .node-parameter {{
+        min-width: 0;
+        padding: 10px 12px;
+        border: 1px solid rgba(148, 163, 184, 0.20);
+        border-radius: 10px;
+        background: #ffffff;
+    }}
+    .node-parameter-label {{
+        display: block;
+        color: #64748b;
+        font-size: 0.70rem;
+        font-weight: 700;
+        letter-spacing: 0.035em;
+        line-height: 1.2;
+        min-height: 2.4em;
+        text-transform: uppercase;
+        white-space: normal;
+    }}
+    .node-parameter-value {{
+        display: block;
+        margin-top: 3px;
+        color: #0f172a;
+        font-size: 1.3rem;
+        font-weight: 750;
+        line-height: 1.1;
+    }}
+    @media (max-width: 650px) {{
+        .node-parameters {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 850px) {{
+        .st-key-node-detail-figures [data-testid="stHorizontalBlock"] {{
+            flex-direction: column;
+        }}
+        .st-key-node-detail-figures [data-testid="stColumn"] {{
+            width: 100% !important;
+            min-width: 100% !important;
+        }}
     }}
     .figure-media-wrap {{
         width: 100%;
@@ -1559,38 +2229,27 @@ st.markdown(
         padding: 14px;
         background: #fcfcfc;
     }}
-    .cmap-inner {{
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        overflow: visible;
-    }}
-    .cmap-inner svg,
-    .canalization-map-svg {{
-        display: block;
-        margin: auto;
-        max-width: 100%;
-        max-height: 100%;
-        width: auto;
-        height: auto;
+    .cmap-panel.half-size-map .figure-media-wrap img {{
+        max-width: 50%;
+        max-height: 50%;
     }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-schemata_col, cmap_col = st.columns(2, gap="medium")
+node_detail_figures = st.container(key="node-detail-figures")
+with node_detail_figures:
+    schemata_col, cmap_col = st.columns(2, gap="medium")
 
 with schemata_col:
-    st.markdown("#### Node schematas")
+    st.markdown("##### Node schematas")
     try:
-        schemata_fig = plot_schemata(selected_node)
-        buf = io.BytesIO()
-        schemata_fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.35, dpi=200, facecolor="white")
-        buf.seek(0)
-        schemata_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        schemata_b64 = session_cached(
+            "_node_analysis_cache",
+            (current_model_cache_key, selected_node_cache_id, "schemata_png"),
+            lambda: render_schemata_png(selected_node),
+        )
         st.markdown(
             f'''
             <div class="square-figure-panel">
@@ -1601,34 +2260,21 @@ with schemata_col:
             ''',
             unsafe_allow_html=True,
         )
-        plt.close(schemata_fig)
     except Exception as e:
         st.warning(f"Could not draw F' / F'' schematas for this node: {e}")
 
 with cmap_col:
-    st.markdown("#### Canalization map")
+    st.markdown("##### Canalization map")
     try:
-        try:
-            CM = selected_node.canalizing_map(bound='upper')
-        except TypeError:
-            CM = selected_node.canalizing_map()
-
-        CM_gv = draw_canalizing_map_graphviz(CM)
-        try:
-            CM_gv.graph_attr.update({
-                "pad": "0.02",
-                "margin": "0.0",
-                "ratio": "compress"
-            })
-        except Exception:
-            pass
-
-        svg = CM_gv.pipe(format="svg").decode("utf-8")
-        svg = clean_svg_for_panel(svg)
-        svg_b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+        svg_b64, schemata_count = session_cached(
+            "_node_analysis_cache",
+            (current_model_cache_key, selected_node_cache_id, "canalization_svg"),
+            lambda: render_canalization_map_svg(selected_node),
+        )
+        half_size_class = " half-size-map" if schemata_count == 2 else ""
         st.markdown(
             f'''
-            <div class="square-figure-panel cmap-panel">
+            <div class="square-figure-panel cmap-panel{half_size_class}">
                 <div class="figure-media-wrap">
                     <img src="data:image/svg+xml;base64,{svg_b64}" alt="Canalization map" />
                 </div>
