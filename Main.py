@@ -1,4 +1,3 @@
-# streamlit2_with_legends.py
 # Effective / Activity / Excess Canalization / Correlation Graph Explorer + Schemata Viewer
 
 import os
@@ -71,6 +70,7 @@ NETWORK_GRAPH_COMPONENT = components.declare_component(
     "network_graph_component",
     path=os.path.join(os.path.dirname(__file__), "network_graph_component"),
 )
+CASCI_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "casci_logo_200.jpg")
 
 
 # -------------------- Helpers --------------------
@@ -1581,7 +1581,7 @@ all_model_names = sorted(list(registry.keys()), key=lambda x: x.lower())
 default_name = "Apoptosis Network" if "Apoptosis Network" in all_model_names else all_model_names[0]
 
 st.sidebar.image(
-    "https://casci.binghamton.edu/img/casci_logo_200.jpg",
+    CASCI_LOGO_PATH,
     width=120,
 )
 
@@ -1740,9 +1740,22 @@ if thr_min == thr_max:
 thr_default = thr_min
 step = (thr_max - thr_min) / 100.0 if thr_max > thr_min else 0.01
 
+
+def clear_graph_focus_for_threshold():
+    """Return the graph to its overview when edge filtering changes."""
+    st.session_state["_graph_focus_node_id"] = ""
+    st.session_state["_graph_focus_context"] = ""
+    # The component keeps a browser-side focus value too. Changing this token
+    # gives it a new context and clears that value on the next render.
+    st.session_state["_graph_focus_reset_token"] = (
+        int(st.session_state.get("_graph_focus_reset_token", 0)) + 1
+    )
+
+
 thr = st.sidebar.slider(
     "Threshold", float(thr_min), float(thr_max), float(thr_default), float(step),
-    key="thr_slider"
+    key="thr_slider",
+    on_change=clear_graph_focus_for_threshold,
 )
 
 node_size_in = adaptive_default
@@ -1868,7 +1881,8 @@ graph_node_name_by_id = {
     str(node_id): str(graph_source.nodes[node_id].get("label", node_id))
     for node_id in graph_source.nodes()
 }
-graph_focus_context = f"overview-v3|{current_model_cache_key}"
+focus_reset_token = int(st.session_state.get("_graph_focus_reset_token", 0))
+graph_focus_context = f"overview-v4|{current_model_cache_key}|{focus_reset_token}"
 focused_graph_node_id = (
     st.session_state.get("_graph_focus_node_id", "")
     if st.session_state.get("_graph_focus_context") == graph_focus_context
@@ -1902,13 +1916,14 @@ if source_label == "Cell Collective":
             .source-reference-line {{ color: #7a7f89; font-size: 0.875rem; line-height: 1.55; margin: 0.55rem 0 0.95rem; }}
             .source-reference-line a {{ font: inherit; font-weight: 600; text-decoration: none; }}
             .source-reference-line a:hover {{ text-decoration: underline; }}
+            .source-primary-label {{ text-decoration: underline; }}
             .source-model-link {{ color: #1667b7; }}
             .source-paper-link {{ color: #a14f22; }}
             .source-reference-separator {{ color: #b4bbc5; padding: 0 0.35rem; }}
             .primary-paper-title {{ font-weight: 750; color: #475569; }}
             </style>
             <div class="source-reference-line">
-              Primary paper: {citation_html}
+              <span class="source-primary-label">Primary paper:</span> {citation_html}
               <span class="source-reference-separator">·</span><a class="source-model-link" href="{escape(source_info['model_url'], quote=True)}" target="_blank" rel="noopener noreferrer">View model in Cell Collective ↗</a>
               {f'<span class="source-reference-separator">·</span>{paper_link}' if paper_link else ''}
             </div>
