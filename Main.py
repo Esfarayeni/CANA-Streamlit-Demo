@@ -31,7 +31,12 @@ from cana.drawing.canalizing_map import draw_canalizing_map_graphviz
 
 
 # -------------------- Page & style --------------------
-st.set_page_config(page_title="Effective Graph Threshold Explorer", layout="wide")
+APP_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "three_node_triangle_favicon_tight.png")
+st.set_page_config(
+    page_title="Canalization Atlas",
+    page_icon=APP_ICON_PATH,
+    layout="wide",
+)
 
 RADIUS        = 5.0
 CANVAS_INCH   = 5
@@ -1976,7 +1981,7 @@ st.markdown(
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 10px;
-        margin: 0 0 14px 0;
+        margin: 0 0 28px 0;
     }
     .network-parameter {
         padding: 11px 12px;
