@@ -33,7 +33,7 @@ from cana.drawing.canalizing_map import draw_canalizing_map_graphviz
 # -------------------- Page & style --------------------
 APP_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "three_node_triangle_favicon_tight.png")
 st.set_page_config(
-    page_title="Canalization Atlas",
+    page_title="Canalization Explorer",
     page_icon=APP_ICON_PATH,
     layout="wide",
 )
@@ -1649,6 +1649,18 @@ if use_uploaded:
 if uploaded_error:
     st.stop()
 
+
+def clear_graph_focus():
+    """Return the graph to its overview after a view-defining control changes."""
+    st.session_state["_graph_focus_node_id"] = ""
+    st.session_state["_graph_focus_context"] = ""
+    # The component keeps a browser-side focus value too. Changing this token
+    # gives it a new context and clears that value on the next render.
+    st.session_state["_graph_focus_reset_token"] = (
+        int(st.session_state.get("_graph_focus_reset_token", 0)) + 1
+    )
+
+
 selected_model_name = st.sidebar.selectbox(
     "Select model",
     all_model_names,
@@ -1661,7 +1673,8 @@ metric = st.sidebar.selectbox(
     "Metric",
     ["Edge effectiveness", "Activity", "Excess canalization", "Correlation"],
     index=0,
-    key="metric_select"
+    key="metric_select",
+    on_change=clear_graph_focus,
 )
 
 degree_mode = st.sidebar.toggle("Use in-degree for node coloring", value=False, key="degree_toggle")
@@ -1746,21 +1759,10 @@ thr_default = thr_min
 step = (thr_max - thr_min) / 100.0 if thr_max > thr_min else 0.01
 
 
-def clear_graph_focus_for_threshold():
-    """Return the graph to its overview when edge filtering changes."""
-    st.session_state["_graph_focus_node_id"] = ""
-    st.session_state["_graph_focus_context"] = ""
-    # The component keeps a browser-side focus value too. Changing this token
-    # gives it a new context and clears that value on the next render.
-    st.session_state["_graph_focus_reset_token"] = (
-        int(st.session_state.get("_graph_focus_reset_token", 0)) + 1
-    )
-
-
 thr = st.sidebar.slider(
     "Threshold", float(thr_min), float(thr_max), float(thr_default), float(step),
     key="thr_slider",
-    on_change=clear_graph_focus_for_threshold,
+    on_change=clear_graph_focus,
 )
 
 node_size_in = adaptive_default

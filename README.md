@@ -1,4 +1,4 @@
-# Canalization Atlas
+# Canalization Explorer
 An interactive Streamlit application for exploring Boolean network models from Cell Collective using the CANA Python library.
 
 ## Cell Collective metadata
