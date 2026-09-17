@@ -34,9 +34,29 @@
       const parentOrigin = (() => {
         try { return new URL(document.referrer).origin; } catch (_) { return "*"; }
       })();
-      let lastLocalFocusId = "";
+      // A click may trigger several component renders before Streamlit returns
+      // the authoritative focused_node_id. Keep it only until that response,
+      // then rely exclusively on the server-provided value.
+      let pendingFocusId = "";
+      let pendingClear = false;
       let lastContextId = "";
       let lastFrameHeight = 0;
+
+      function focusStorageKey(contextId, suffix) {
+        return `cana-network-focus:${contextId}:${suffix}`;
+      }
+
+      function readStoredValue(key) {
+        try { return window.sessionStorage.getItem(key) || ""; } catch (_) { return ""; }
+      }
+
+      function writeStoredValue(key, value) {
+        try { window.sessionStorage.setItem(key, value); } catch (_) { /* storage is optional */ }
+      }
+
+      function removeStoredValue(key) {
+        try { window.sessionStorage.removeItem(key); } catch (_) { /* storage is optional */ }
+      }
 
       function sendMessage(type, payload) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, parentOrigin);
@@ -81,7 +101,12 @@
       function render(args) {
         const contextId = String(args.context_id || "");
         if (contextId !== lastContextId) {
-          lastLocalFocusId = "";
+          if (lastContextId) {
+            removeStoredValue(focusStorageKey(lastContextId, "node"));
+            removeStoredValue(focusStorageKey(lastContextId, "clear"));
+          }
+          pendingFocusId = readStoredValue(focusStorageKey(contextId, "node"));
+          pendingClear = readStoredValue(focusStorageKey(contextId, "clear")) === "1";
           lastContextId = contextId;
         }
         host.innerHTML = sanitizeSvg(args.svg);
@@ -130,14 +155,22 @@
             : [];
         }
 
-        function clearFocus() {
+        function clearFocus(notifyParent = false) {
+          const wasFocused = Boolean(focusedNodeId || pendingFocusId);
           focusedNodeId = null;
-          lastLocalFocusId = "";
           nodes.forEach((node) => node.classList.remove("dimmed", "focused", "neighbor"));
           nodes.forEach((node) => node.removeAttribute("aria-current"));
           edges.forEach((edge) => edge.classList.remove(
             "dimmed", "connected", "incoming", "outgoing"
           ));
+          if (notifyParent && wasFocused) {
+            pendingFocusId = "";
+            pendingClear = true;
+            removeStoredValue(focusStorageKey(contextId, "node"));
+            writeStoredValue(focusStorageKey(contextId, "clear"), "1");
+            const eventId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+            setComponentValue({ clear_focus: true, event_id: eventId });
+          }
         }
 
         function focusNode(node) {
@@ -145,7 +178,6 @@
           if (!nodeId) return;
 
           focusedNodeId = nodeId;
-          lastLocalFocusId = nodeId;
           const relatedIds = new Set([nodeId]);
           const relatedEdges = new Set();
           edges.forEach((edge) => {
@@ -178,6 +210,10 @@
         function selectNode(node, event) {
           event.stopPropagation();
           focusNode(node);
+          pendingFocusId = graphId(node);
+          pendingClear = false;
+          writeStoredValue(focusStorageKey(contextId, "node"), pendingFocusId);
+          removeStoredValue(focusStorageKey(contextId, "clear"));
           const eventId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
           setComponentValue({ node_id: graphId(node), event_id: eventId });
         }
@@ -191,11 +227,34 @@
             }
           });
         });
-        host.querySelector("svg")?.addEventListener("click", clearFocus);
+        host.querySelector("svg")?.addEventListener("click", () => clearFocus(true));
 
-        const requestedFocusId = lastLocalFocusId || String(args.focused_node_id || "");
-        const selectedNode = nodes.find((node) => graphId(node) === requestedFocusId);
-        if (selectedNode) focusNode(selectedNode);
+        const serverFocusId = String(args.focused_node_id || "");
+        if (pendingClear) {
+          clearFocus();
+          if (!serverFocusId) {
+            pendingClear = false;
+            removeStoredValue(focusStorageKey(contextId, "clear"));
+          }
+        } else {
+          // A click event reaches Python after this render is requested, so
+          // serverFocusId can still identify the previous node. The locally
+          // stored click survives an iframe remount until Python confirms it.
+          const requestedFocusId = pendingFocusId || serverFocusId;
+          const selectedNode = nodes.find((node) => graphId(node) === requestedFocusId);
+          if (selectedNode) {
+            focusNode(selectedNode);
+            if (serverFocusId && serverFocusId === pendingFocusId) {
+              pendingFocusId = "";
+              removeStoredValue(focusStorageKey(contextId, "node"));
+            }
+          } else {
+            const hadPendingFocus = Boolean(pendingFocusId);
+            pendingFocusId = "";
+            if (hadPendingFocus) removeStoredValue(focusStorageKey(contextId, "node"));
+            clearFocus();
+          }
+        }
         requestAnimationFrame(updateFrameHeight);
       }
 

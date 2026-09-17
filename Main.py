@@ -75,7 +75,9 @@ NETWORK_GRAPH_COMPONENT = components.declare_component(
     "network_graph_component",
     path=os.path.join(os.path.dirname(__file__), "network_graph_component"),
 )
-CASCI_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "casci_logo_200.jpg")
+CASCI_LOGO_PATH = os.path.join(
+    os.path.dirname(__file__), "assets", "casci_canalization_explorer_logo_transparent.png"
+)
 
 
 # -------------------- Helpers --------------------
@@ -1587,7 +1589,7 @@ default_name = "Apoptosis Network" if "Apoptosis Network" in all_model_names els
 
 st.sidebar.image(
     CASCI_LOGO_PATH,
-    width=120,
+    width=270,
 )
 
 with st.sidebar.expander("Quick guide", expanded=False):
@@ -1615,13 +1617,10 @@ with st.sidebar.expander("Quick guide", expanded=False):
         unsafe_allow_html=True,
     )
 
-uploaded_cnet = st.sidebar.file_uploader(
-    "Upload a .cnet  Boolean network file",
-    type=["cnet", "txt"],
-    key="uploaded_cnet_file",
-    label_visibility="collapsed",
-)
-
+# The uploader is rendered after the analysis controls below. Its keyed value
+# is already available at the beginning of a rerun, letting uploads continue
+# to take priority over the selected catalogue model.
+uploaded_cnet = st.session_state.get("uploaded_cnet_file")
 use_uploaded = uploaded_cnet is not None
 
 uploaded_bn = None
@@ -1640,14 +1639,8 @@ if use_uploaded:
         uploaded_bn = load_uploaded_cnet_from_bytes(uploaded_bytes, uploaded_cnet.name)
         validate_uploaded_network(uploaded_bn)
         uploaded_name = get_bn_display_name(uploaded_bn, fallback=uploaded_cnet.name)
-        st.sidebar.success(f"Loaded uploaded network: {uploaded_name}")
     except Exception as e:
         uploaded_error = str(e)
-        st.sidebar.error("Could not load the uploaded CNET file.")
-        st.sidebar.caption(uploaded_error)
-
-if uploaded_error:
-    st.stop()
 
 
 def clear_graph_focus():
@@ -1659,6 +1652,11 @@ def clear_graph_focus():
     st.session_state["_graph_focus_reset_token"] = (
         int(st.session_state.get("_graph_focus_reset_token", 0)) + 1
     )
+
+
+def focus_node_selected_in_sidebar():
+    """Request graph focus for an explicit sidebar node-selector change."""
+    st.session_state["_sidebar_node_focus_pending"] = True
 
 
 selected_model_name = st.sidebar.selectbox(
@@ -1746,9 +1744,9 @@ except Exception as e:
 if metric == "Edge effectiveness":
     thr_min, thr_max = 0.0, 1.0
 elif metric == "Activity":
-    thr_min, thr_max = float(act_min), float(act_max)
+    thr_min, thr_max = 0.0, max(0.0, float(act_max))
 elif metric == "Excess canalization":
-    thr_min, thr_max = float(ex_min), float(ex_max)
+    thr_min, thr_max = 0.0, max(0.0, float(ex_max))
 else:
     thr_min, thr_max = 0.0, float(corr_abs_max)
 
@@ -1890,6 +1888,23 @@ graph_node_name_by_id = {
 }
 focus_reset_token = int(st.session_state.get("_graph_focus_reset_token", 0))
 graph_focus_context = f"overview-v4|{current_model_cache_key}|{focus_reset_token}"
+
+# The sidebar callback marks deliberate selector changes before this script
+# runs. It avoids treating an initial render, model change, or graph click as
+# an instruction to alter the graph view.
+if st.session_state.pop("_sidebar_node_focus_pending", False):
+    selected_graph_node_id = next(
+        (
+            node_id
+            for node_id, node_name in graph_node_name_by_id.items()
+            if node_name == selected_node_name
+        ),
+        "",
+    )
+    if selected_graph_node_id:
+        st.session_state["_graph_focus_context"] = graph_focus_context
+        st.session_state["_graph_focus_node_id"] = selected_graph_node_id
+
 focused_graph_node_id = (
     st.session_state.get("_graph_focus_node_id", "")
     if st.session_state.get("_graph_focus_context") == graph_focus_context
@@ -1983,14 +1998,61 @@ st.markdown(
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 10px;
-        margin: 0 0 28px 0;
+        flex: 1 1 auto;
+        margin: 0;
+    }
+    .model-parameters-row,
+    .node-parameters-panel {
+        display: flex;
+        align-items: stretch;
+        gap: 14px;
+    }
+    .model-parameters-row {
+        margin: 0 0 8px 0;
+    }
+    .model-parameters-label,
+    .node-parameters-label {
+        flex: 0 0 96px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #475569;
+        font-size: 0.74rem;
+        font-weight: 750;
+        letter-spacing: 0.05em;
+        line-height: 1.25;
+        text-transform: uppercase;
+    }
+    .parameters-label-icon {
+        flex: 0 0 auto;
+        width: 26px;
+        height: 26px;
+        display: inline-grid;
+        place-items: center;
+        border-radius: 50%;
+        background: #edf5ff;
+        color: #1769c2;
+    }
+    .parameters-label-icon svg {
+        width: 15px;
+        height: 15px;
+        stroke: currentColor;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 2;
     }
     .network-parameter {
+        min-width: 0;
         padding: 11px 12px;
         border: 1px solid rgba(148, 163, 184, 0.24);
         border-radius: 12px;
         background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        display: flex;
+        align-items: center;
+        gap: 10px;
     }
+    .parameter-card-copy { min-width: 0; }
     .network-parameter-label {
         display: block;
         color: #64748b;
@@ -2009,6 +2071,16 @@ st.markdown(
     }
     @media (max-width: 560px) {
         .network-parameters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .model-parameters-row,
+        .node-parameters-panel { flex-direction: column; }
+        .model-parameters-label,
+        .node-parameters-label { flex-basis: auto; }
+    }
+    @media (max-width: 1400px) {
+        .network-parameters,
+        .node-parameters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .model-parameters-label,
+        .node-parameters-label { flex-basis: 88px; }
     }
     @media (max-width: 1100px) {
         .st-key-network-display [data-testid="stHorizontalBlock"] {
@@ -2031,15 +2103,19 @@ with network_display:
 with c1:
     st.markdown(
         f"""
-        <div class="network-parameters" aria-label="Model parameters">
-          <div class="network-parameter"><span class="network-parameter-label">Nodes</span><span class="network-parameter-value">{model_node_count}</span></div>
-          <div class="network-parameter"><span class="network-parameter-label">Edges</span><span class="network-parameter-value">{model_edge_count}</span></div>
-          <div class="network-parameter"><span class="network-parameter-label">Input nodes</span><span class="network-parameter-value">{model_input_node_count}</span></div>
-          <div class="network-parameter"><span class="network-parameter-label">Output nodes</span><span class="network-parameter-value">{model_output_node_count}</span></div>
+        <div class="model-parameters-row" aria-label="Model parameters">
+          <div class="model-parameters-label"><span class="parameters-label-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="5" cy="5" r="2.5"></circle><circle cx="19" cy="8" r="2.5"></circle><circle cx="12" cy="19" r="2.5"></circle><path d="M7.2 6.2 16.7 7.3M6.6 7.2l4.2 9.4M17.7 10.1l-4.2 6.6"></path></svg></span><span>Model parameters</span></div>
+          <div class="network-parameters">
+            <div class="network-parameter"><span class="parameter-card-copy"><span class="network-parameter-label">Nodes</span><span class="network-parameter-value">{model_node_count}</span></span></div>
+            <div class="network-parameter"><span class="parameter-card-copy"><span class="network-parameter-label">Edges</span><span class="network-parameter-value">{model_edge_count}</span></span></div>
+            <div class="network-parameter"><span class="parameter-card-copy"><span class="network-parameter-label">Input nodes</span><span class="network-parameter-value">{model_input_node_count}</span></span></div>
+            <div class="network-parameter"><span class="parameter-card-copy"><span class="network-parameter-label">Output nodes</span><span class="network-parameter-value">{model_output_node_count}</span></span></div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    node_parameters_slot = st.container(key="selected-node-parameters-slot")
     graph_click_event = render_clickable_network_graph(
         g,
         focused_graph_node_id,
@@ -2048,12 +2124,16 @@ with c1:
     if isinstance(graph_click_event, dict):
         click_event_id = str(graph_click_event.get("event_id", ""))
         clicked_node_id = str(graph_click_event.get("node_id", ""))
+        clear_focus_requested = bool(graph_click_event.get("clear_focus"))
         clicked_node_name = graph_node_name_by_id.get(clicked_node_id)
         if click_event_id and click_event_id != st.session_state.get("_last_graph_click_event"):
             st.session_state["_last_graph_click_event"] = click_event_id
-            st.session_state["_graph_focus_context"] = graph_focus_context
-            st.session_state["_graph_focus_node_id"] = clicked_node_id
-            if clicked_node_name in node_names and clicked_node_name != selected_node_name:
+            if clear_focus_requested:
+                clear_graph_focus()
+            else:
+                st.session_state["_graph_focus_context"] = graph_focus_context
+                st.session_state["_graph_focus_node_id"] = clicked_node_id
+            if not clear_focus_requested and clicked_node_name in node_names and clicked_node_name != selected_node_name:
                 st.session_state["node_schemata_select"] = clicked_node_name
                 selected_node_name = clicked_node_name
 
@@ -2061,7 +2141,24 @@ selected_node_name = node_selector_slot.selectbox(
     "Select node for F' / F'' & canalization map",
     node_names,
     key="node_schemata_select",
+    on_change=focus_node_selected_in_sidebar,
 )
+
+st.sidebar.markdown("#### Upload your model")
+uploaded_cnet = st.sidebar.file_uploader(
+    "Upload a .cnet Boolean network file",
+    type=["cnet", "txt"],
+    key="uploaded_cnet_file",
+    label_visibility="collapsed",
+)
+if uploaded_cnet is not None and not use_uploaded:
+    st.rerun()
+if uploaded_bn is not None:
+    st.sidebar.success(f"Loaded uploaded network: {uploaded_name}")
+elif uploaded_error:
+    st.sidebar.error("Could not load the uploaded CNET file.")
+    st.sidebar.caption(uploaded_error)
+
 selected_node_index = node_names.index(selected_node_name)
 selected_node = bn.nodes[selected_node_index]
 
@@ -2137,21 +2234,6 @@ selected_node_cache_id = getattr(selected_node, "id", selected_node_index)
     ),
 )
 
-st.markdown(
-    f"""
-    <div class="node-parameters-panel" aria-label="Selected node parameters">
-      <div class="node-parameters-label">Selected node parameters</div>
-      <div class="node-parameters">
-        <div class="node-parameter"><span class="node-parameter-label">Inputs</span><span class="node-parameter-value">{selected_node_input_count}</span></div>
-        <div class="node-parameter"><span class="node-parameter-label">Sensitivity</span><span class="node-parameter-value">{selected_node_sensitivity}</span></div>
-        <div class="node-parameter"><span class="node-parameter-label">Effective connectivity</span><span class="node-parameter-value">{selected_node_effective_connectivity}</span></div>
-        <div class="node-parameter"><span class="node-parameter-label">Bias</span><span class="node-parameter-value">{selected_node_bias}</span></div>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 st.markdown(f"#### Node schematas and canalization map for `{selected_node_name}`")
 
 SQUARE_PANEL_SIZE_PX = 700
@@ -2173,14 +2255,24 @@ st.markdown(
         box-sizing: border-box;
     }}
     .node-parameters-panel {{
-        margin: 1.35rem 0 1rem;
-        padding: 14px;
-        border: 1px solid rgba(148, 163, 184, 0.24);
-        border-radius: 14px;
-        background: #fbfcfe;
+        display: flex;
+        align-items: stretch;
+        gap: 14px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+    }}
+    .st-key-selected-node-parameters-slot {{
+        min-height: 142px;
     }}
     .node-parameters-label {{
-        margin-bottom: 10px;
+        flex: 0 0 96px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
         color: #475569;
         font-size: 0.78rem;
         font-weight: 750;
@@ -2190,6 +2282,7 @@ st.markdown(
     .node-parameters {{
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
+        flex: 1 1 auto;
         gap: 10px;
     }}
     .node-parameter {{
@@ -2198,6 +2291,9 @@ st.markdown(
         border: 1px solid rgba(148, 163, 184, 0.20);
         border-radius: 10px;
         background: #ffffff;
+        display: flex;
+        align-items: center;
+        gap: 9px;
     }}
     .node-parameter-label {{
         display: block;
@@ -2219,7 +2315,14 @@ st.markdown(
         line-height: 1.1;
     }}
     @media (max-width: 650px) {{
+        .node-parameters-panel {{ flex-direction: column; }}
+        .node-parameters-label {{ flex-basis: auto; }}
         .node-parameters {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        .st-key-selected-node-parameters-slot {{ min-height: 210px; }}
+    }}
+    @media (min-width: 651px) and (max-width: 1400px) {{
+        .node-parameters {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        .st-key-selected-node-parameters-slot {{ min-height: 164px; }}
     }}
     @media (max-width: 850px) {{
         .st-key-node-detail-figures [data-testid="stHorizontalBlock"] {{
@@ -2259,6 +2362,22 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+with node_parameters_slot:
+    st.markdown(
+        f"""
+        <div class="node-parameters-panel" aria-label="Selected node parameters">
+          <div class="node-parameters-label"><span class="parameters-label-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M9 4v6M15 14v6"></path><circle cx="9" cy="7" r="2"></circle><circle cx="15" cy="17" r="2"></circle></svg></span><span>Selected node parameters</span></div>
+          <div class="node-parameters">
+            <div class="node-parameter"><span class="parameter-card-copy"><span class="node-parameter-label">Inputs</span><span class="node-parameter-value">{selected_node_input_count}</span></span></div>
+            <div class="node-parameter"><span class="parameter-card-copy"><span class="node-parameter-label">Sensitivity</span><span class="node-parameter-value">{selected_node_sensitivity}</span></span></div>
+            <div class="node-parameter"><span class="parameter-card-copy"><span class="node-parameter-label">Effective connectivity</span><span class="node-parameter-value">{selected_node_effective_connectivity}</span></span></div>
+            <div class="node-parameter"><span class="parameter-card-copy"><span class="node-parameter-label">Bias</span><span class="node-parameter-value">{selected_node_bias}</span></span></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 node_detail_figures = st.container(key="node-detail-figures")
 with node_detail_figures:
