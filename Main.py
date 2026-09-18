@@ -544,7 +544,17 @@ def render_hoverable_network_graph(graph):
 
 def render_clickable_network_graph(graph, focused_node_id, context_id):
     """Render the network component and return the most recent click event."""
-    svg = graphviz_svg_from_source(graph.source, graph.engine)
+    try:
+        svg = graphviz_svg_from_source(graph.source, graph.engine)
+    except graphviz.backend.execute.CalledProcessError:
+        # Keep a Graphviz failure from taking down the whole dashboard.  This
+        # should be rare now that circular graphs use line routing, but a
+        # model with malformed graph data still deserves a useful response.
+        st.warning(
+            "This model's network graph could not be rendered. Try another "
+            "metric or model; the rest of the explorer remains available."
+        )
+        return {}
     return NETWORK_GRAPH_COMPONENT(
         svg=svg,
         focused_node_id=str(focused_node_id or ""),
@@ -557,7 +567,13 @@ def render_clickable_network_graph(graph, focused_node_id, context_id):
 @st.cache_data(show_spinner=False, max_entries=32)
 def graphviz_svg_from_source(source, engine="dot"):
     """Render and cache deterministic Graphviz source as embeddable SVG."""
-    svg = graphviz.Source(source, engine=engine).pipe(format="svg").decode("utf-8")
+    # Network views use fixed circular node positions.  Straight edges avoid
+    # the fragile spline-routing path on dense models, while allowing neato to
+    # retain Graphviz's normal coordinate scaling (also required by
+    # canalization maps, whose nodes do not have fixed positions).
+    svg = graphviz.Source(source, engine=engine).pipe(
+        format="svg", quiet=True
+    ).decode("utf-8")
     svg = re.sub(r"<\?xml[^>]*\?>", "", svg, flags=re.IGNORECASE)
     return re.sub(r"<!DOCTYPE[^>]*>", "", svg, flags=re.IGNORECASE).strip()
 
@@ -736,7 +752,7 @@ def build_graphviz_effective(
         ratio='1',
         margin='0.2',
         pad='0.1',
-        splines='true',
+        splines='line',
     )
     g.attr(
         'node',
@@ -1007,7 +1023,7 @@ def build_graphviz_structural(SG, node_values, special_nodes_set, positions, nod
         ratio='1',
         margin='0.2',
         pad='0.1',
-        splines='true',
+        splines='line',
     )
     g.attr(
         'node',
