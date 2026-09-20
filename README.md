@@ -2,13 +2,13 @@
 
 An interactive Streamlit dashboard for exploring Boolean-network structure, logic, and canalization.
 
-![CASCI Canalization Explorer logo](assets/casci_canalization_explorer_logo_transparent.png)
+![CASCI Canalization Explorer logo](assets/readme_logo.png)
 
 [GitHub repository](https://github.com/Esfarayeni/CANA-Streamlit-Demo) · [Python 3.11+](https://www.python.org/) · [Built with Streamlit](https://streamlit.io/) · [Powered by CANA](https://github.com/CASCI-lab/CANA)
 
 Canalization Explorer lets researchers inspect Boolean-network models from the [Cell Collective](https://cellcollective.org/) and their own `.cnet` files. It combines network-level metrics with node-level Boolean schemata and canalization maps, making the relationship between a model’s topology and logic easier to explore.
 
-Developed at the [CASCI Lab](https://casci.binghamton.edu/casci.php) and built with the [CANA Python library](https://github.com/CASCI-lab/CANA).
+Developed by [Shayan Esfarayeni](https://www.linkedin.com/in/shayanesfarayeni/) at the [CASCI Lab](https://casci.binghamton.edu/casci.php) and built with the [CANA Python library](https://github.com/CASCI-lab/CANA).
 
 ## Highlights
 
