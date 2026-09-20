@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
 
 APP_TITLE = "Canalization Explorer"
-APP_ICON_PATH = ASSETS_DIR / "three_node_triangle_favicon_tight.png"
+APP_ICON_PATH = ASSETS_DIR / "canalization_explorer_favicon.png"
 CASCI_LOGO_PATH = ASSETS_DIR / "casci_canalization_explorer_logo_transparent.png"
 MODEL_METADATA_PATH = PROJECT_ROOT / "model_metadata.json"
 
