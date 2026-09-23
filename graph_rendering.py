@@ -370,19 +370,19 @@ def render_graph_legend(metric: str, threshold_value: float, degree_mode: str, s
         (_legend_line("black", "dashed", 3), "negative correlation"),
         (_legend_line("red", "dashed", 3), "correlation = 0"),
     ])
-    row_style = "margin:6px 0; padding:6px 8px; border-radius:10px; background:rgba(248,250,252,0.95); border:1px solid rgba(148,163,184,0.14);"
-    rows = lambda items: "".join(f"<div style='{row_style}'>{icon}<span>{label}</span></div>" for icon, label in items)
+    row_style = "margin:6px 0; padding:6px 8px; border-radius:10px; background:rgba(248,250,252,0.95); border:1px solid rgba(148,163,184,0.14); color:#0f172a !important;"
+    rows = lambda items: "".join(f"<div style='{row_style}'>{icon}<span style='color:#0f172a !important;'>{label}</span></div>" for icon, label in items)
     maximum = float(scale_max) if float(scale_max) > 0 else 0.0
     st.markdown(f"""
-    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin-bottom:6px; color:#0f172a;">Nodes</div>
+    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin-bottom:6px; color:#0f172a !important;">Nodes</div>
     {rows(node_items)}
-    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin:12px 0 6px; color:#0f172a;">Edges</div>
+    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin:12px 0 6px; color:#0f172a !important;">Edges</div>
     {rows(edge_items)}
-    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin:12px 0 6px; color:#0f172a;">Node color scale ({degree_mode.lower()})</div>
-    <div style="margin-top:6px; padding:8px 10px; border-radius:12px; background:rgba(248,250,252,0.95); border:1px solid rgba(148,163,184,0.14);">
+    <div style="font-weight:700; font-size:0.88rem; letter-spacing:0.02em; margin:12px 0 6px; color:#0f172a !important;">Node color scale ({degree_mode.lower()})</div>
+    <div style="margin-top:6px; padding:8px 10px; border-radius:12px; background:rgba(248,250,252,0.95); border:1px solid rgba(148,163,184,0.14); color:#0f172a !important;">
       <div style="width:100%; height:16px; border:1px solid #999; border-radius:8px; background:linear-gradient(to right,#2ca02c 0%,#f7f7f7 18%,#fddbc7 45%,#fca082 70%,#f1695c 85%,#d62728 100%);"></div>
-      <div style="display:flex; justify-content:space-between; font-size:0.9em; margin-top:4px;"><span>0.00</span><span>{maximum:.2f}</span></div>
-      <div style="font-size:0.9em; color:#444; margin-top:4px;">Green = zero, darker red = larger {degree_mode.lower()} value</div>
+      <div style="display:flex; justify-content:space-between; font-size:0.9em; margin-top:4px; color:#0f172a !important;"><span>0.00</span><span>{maximum:.2f}</span></div>
+      <div style="font-size:0.9em; color:#334155 !important; margin-top:4px;">Green = zero, darker red = larger {degree_mode.lower()} value</div>
     </div>
     """, unsafe_allow_html=True)
 

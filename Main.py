@@ -21,6 +21,32 @@ st.set_page_config(
     layout="wide",
 )
 
+# The explorer uses deliberately light graph panels. Declare the palette here
+# too, so browser dark-mode heuristics do not leave custom dark text on a
+# darkened background.
+st.markdown(
+    """
+    <style>
+    :root, html, body { color-scheme: light !important; }
+    [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+        background: #ffffff !important;
+        color: #0f172a !important;
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        background: #f8fafc !important;
+        color: #0f172a !important;
+    }
+    [data-testid="stApp"] [data-testid="stMarkdownContainer"],
+    [data-testid="stApp"] [data-testid="stCaptionContainer"],
+    [data-testid="stApp"] label,
+    [data-testid="stApp"] [data-baseweb="select"] {
+        color: #0f172a;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Legacy helper implementations were extracted into focused modules.
 
 
@@ -489,6 +515,21 @@ st.markdown(
         color: #0f172a;
         margin-bottom: 0.8rem;
     }
+    .st-key-network-guide {
+        background: #ffffff !important;
+        color: #0f172a !important;
+        border-color: rgba(148, 163, 184, 0.35) !important;
+    }
+    .st-key-network-guide .section-label {
+        color: #475569 !important;
+    }
+    .st-key-network-guide .section-title,
+    .st-key-network-guide [data-testid="stMarkdownContainer"],
+    .st-key-network-guide [data-testid="stMarkdownContainer"] div,
+    .st-key-network-guide [data-testid="stMarkdownContainer"] span {
+        color: #0f172a !important;
+    }
+    .st-key-network-guide .section-label { color: #475569 !important; }
     .dashboard-side-card .divider,
     .st-key-network-guide .divider {
         height: 1px;
