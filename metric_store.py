@@ -7,7 +7,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from constants import METRIC_CACHE_PATH
 from metrics import compute_correlation_metrics, compute_structural_metrics
 
 
@@ -17,6 +16,7 @@ EFFECTIVENESS = "effectiveness"
 ACTIVITY = "activity"
 EXCESS = "excess"
 CORRELATION = "correlation"
+METRIC_CACHE_PATH = Path(__file__).resolve().parent / "metric_cache.sqlite3"
 
 
 def _connect(path: Path = METRIC_CACHE_PATH) -> sqlite3.Connection:
