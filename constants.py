@@ -10,6 +10,7 @@ APP_TITLE = "Canalization Explorer"
 APP_ICON_PATH = ASSETS_DIR / "canalization_explorer_favicon.png"
 CASCI_LOGO_PATH = ASSETS_DIR / "casci_canalization_explorer_logo_transparent.png"
 MODEL_METADATA_PATH = PROJECT_ROOT / "model_metadata.json"
+METRIC_CACHE_PATH = PROJECT_ROOT / "metric_cache.sqlite3"
 
 RADIUS = 5.0
 CANVAS_INCH = 5

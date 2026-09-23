@@ -8,13 +8,9 @@
       #network-graph svg { display: block; width: 100%; height: 100%; margin: 0 auto; }
       #network-graph g.node { cursor: pointer; transition: opacity 160ms ease; }
       #network-graph g.node:focus { outline: none; }
-      #network-graph g.node:focus-visible ellipse {
-        stroke: #f59e0b !important;
-        stroke-width: 6px !important;
-        filter: drop-shadow(0 0 3px rgba(245, 158, 11, 0.65));
-      }
+      #network-graph g.node:focus-visible ellipse { stroke: #f59e0b !important; stroke-width: 6px !important; filter: drop-shadow(0 0 3px rgba(245, 158, 11, .65)); }
       #network-graph g.edge { transition: opacity 160ms ease; }
-      #network-graph g.node.dimmed, #network-graph g.edge.dimmed { opacity: 0.13; }
+      #network-graph g.node.dimmed, #network-graph g.edge.dimmed { opacity: .13; }
       #network-graph g.node.focused ellipse { stroke: #0f172a !important; stroke-width: 6px !important; }
       #network-graph g.node.neighbor ellipse { stroke: #2563eb !important; stroke-width: 5px !important; stroke-dasharray: 5 3; }
       #network-graph g.edge.connected path { stroke: #2563eb !important; stroke-width: 3px !important; }
@@ -23,248 +19,362 @@
       #network-graph g.edge.incoming polygon { fill: #be123c !important; stroke: #be123c !important; }
       #network-graph g.edge.outgoing path { stroke: #0891b2 !important; }
       #network-graph g.edge.outgoing polygon { fill: #0891b2 !important; stroke: #0891b2 !important; }
-      #network-graph g.edge.incoming.outgoing path { stroke: #be123c !important; }
-      #network-graph g.edge.incoming.outgoing polygon { fill: #be123c !important; stroke: #be123c !important; }
+      .sphere-canvas { width: 100%; height: 100%; display: block; border-radius: 12px; background: #fff; touch-action: none; cursor: grab; }
+      .sphere-canvas.dragging { cursor: grabbing; }
+      .sphere-help { position: absolute; right: 12px; bottom: 10px; padding: 5px 8px; border-radius: 8px; background: rgba(255,255,255,.85); color: #475569; font: 600 11px/1.2 Helvetica, Arial, sans-serif; pointer-events: none; }
+      .sphere-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+      .sphere-label { position: absolute; color: #e2e8f0; font: 600 11px/1.1 Helvetica, Arial, sans-serif; text-shadow: 0 1px 4px #020617; white-space: nowrap; }
+      .sphere-accessible { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
     </style>
   </head>
   <body>
     <div id="network-graph"></div>
     <script>
       const host = document.getElementById("network-graph");
-      const parentOrigin = (() => {
-        try { return new URL(document.referrer).origin; } catch (_) { return "*"; }
-      })();
-      // A click may trigger several component renders before Streamlit returns
-      // the authoritative focused_node_id. Keep it only until that response,
-      // then rely exclusively on the server-provided value.
-      let pendingFocusId = "";
-      let pendingClear = false;
-      let lastContextId = "";
-      let lastFrameHeight = 0;
-
-      function focusStorageKey(contextId, suffix) {
-        return `cana-network-focus:${contextId}:${suffix}`;
-      }
-
-      function readStoredValue(key) {
-        try { return window.sessionStorage.getItem(key) || ""; } catch (_) { return ""; }
-      }
-
-      function writeStoredValue(key, value) {
-        try { window.sessionStorage.setItem(key, value); } catch (_) { /* storage is optional */ }
-      }
-
-      function removeStoredValue(key) {
-        try { window.sessionStorage.removeItem(key); } catch (_) { /* storage is optional */ }
-      }
-
-      function sendMessage(type, payload) {
-        window.parent.postMessage({ isStreamlitMessage: true, type, ...payload }, parentOrigin);
-      }
-
-      function setFrameHeight(height) {
-        sendMessage("streamlit:setFrameHeight", { height });
-      }
-
-      function setComponentValue(value) {
-        sendMessage("streamlit:setComponentValue", { value });
-      }
-
-      function sanitizeSvg(markup) {
-        const parsed = new DOMParser().parseFromString(markup || "", "image/svg+xml");
-        if (parsed.querySelector("parsererror") || parsed.documentElement.tagName.toLowerCase() !== "svg") {
-          return "";
-        }
-        parsed.querySelectorAll("script, foreignObject, iframe, object, embed").forEach((element) => element.remove());
-        parsed.querySelectorAll("*").forEach((element) => {
-          [...element.attributes].forEach((attribute) => {
-            const name = attribute.name.toLowerCase();
-            const value = attribute.value.trim();
-            if (name.startsWith("on")) element.removeAttribute(attribute.name);
-            if ((name === "href" || name.endsWith(":href")) && value && !value.startsWith("#")) {
-              element.removeAttribute(attribute.name);
-            }
-          });
-        });
-        return parsed.documentElement.outerHTML;
-      }
+      const parentOrigin = (() => { try { return new URL(document.referrer).origin; } catch (_) { return "*"; } })();
+      let pendingFocusId = "", pendingClear = false, lastContextId = "", lastFrameHeight = 0;
+      const storageKey = (contextId, suffix) => `cana-network-focus:${contextId}:${suffix}`;
+      const readStored = (key) => { try { return sessionStorage.getItem(key) || ""; } catch (_) { return ""; } };
+      const writeStored = (key, value) => { try { sessionStorage.setItem(key, value); } catch (_) {} };
+      const removeStored = (key) => { try { sessionStorage.removeItem(key); } catch (_) {} };
+      const send = (type, payload) => parent.postMessage({ isStreamlitMessage: true, type, ...payload }, parentOrigin);
+      const eventId = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 
       function updateFrameHeight() {
         const width = document.documentElement.clientWidth || host.clientWidth || 650;
-        const height = Math.max(480, Math.min(760, Math.round(width * 0.92)));
+        const height = Math.max(480, Math.min(760, Math.round(width * .92)));
         if (Math.abs(height - lastFrameHeight) < 2) return;
-        lastFrameHeight = height;
-        host.style.height = `${height}px`;
-        setFrameHeight(height);
+        lastFrameHeight = height; host.style.height = `${height}px`;
+        send("streamlit:setFrameHeight", { height });
+      }
+      function sanitizeSvg(markup) {
+        const parsed = new DOMParser().parseFromString(markup || "", "image/svg+xml");
+        if (parsed.querySelector("parsererror") || parsed.documentElement.tagName.toLowerCase() !== "svg") return "";
+        parsed.querySelectorAll("script,foreignObject,iframe,object,embed").forEach((element) => element.remove());
+        parsed.querySelectorAll("*").forEach((element) => [...element.attributes].forEach((attribute) => {
+          const name = attribute.name.toLowerCase(), value = attribute.value.trim();
+          if (name.startsWith("on") || ((name === "href" || name.endsWith(":href")) && value && !value.startsWith("#"))) element.removeAttribute(attribute.name);
+        }));
+        return parsed.documentElement.outerHTML;
+      }
+
+      function mountThreeSphere(THREE, sphere, version, getFocused, setFocus, clearFocus, selectNode) {
+        if (version !== renderVersion) return;
+        host.innerHTML = '<canvas class="sphere-canvas" aria-label="Interactive 3D Boolean network. Drag to orbit, scroll to zoom, and click a node to select it."></canvas><div class="sphere-help">Drag to orbit · Scroll to zoom · Click a node to focus</div><div class="sphere-labels" aria-hidden="true"></div><div class="sphere-accessible" role="group" aria-label="3D Boolean network"></div>';
+        const canvas = host.querySelector("canvas");
+        const labelsLayer = host.querySelector(".sphere-labels");
+        const accessible = host.querySelector(".sphere-accessible");
+        const nodes = sphere.nodes || [], edges = sphere.edges || [];
+        const radius = Math.max(...nodes.map((node) => Math.hypot(node.x, node.y, node.z)), 1);
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x07111f, 0.026);
+        const camera = new THREE.PerspectiveCamera(38, 1, .1, radius * 20);
+        camera.position.set(0, 0, radius * 3.55);
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+        renderer.setClearColor(0x07111f, .98);
+        const world = new THREE.Group();
+        world.rotation.set(.28, -.65, 0);
+        scene.add(world);
+        scene.add(new THREE.AmbientLight(0xb8d8ff, 1.5));
+        const keyLight = new THREE.PointLight(0x8ec5ff, 18, radius * 10);
+        keyLight.position.set(radius * 2.2, radius * 2.7, radius * 3.5);
+        scene.add(keyLight);
+        const rimLight = new THREE.PointLight(0xff8799, 10, radius * 9);
+        rimLight.position.set(-radius * 3, -radius, -radius * 2);
+        scene.add(rimLight);
+
+        const orb = new THREE.Mesh(
+          new THREE.IcosahedronGeometry(radius * .34, 2),
+          new THREE.MeshStandardMaterial({ color: 0x173f6b, emissive: 0x0b213b, emissiveIntensity: 1, transparent: true, opacity: .72, wireframe: true })
+        );
+        world.add(orb);
+        const ringMaterial = new THREE.LineBasicMaterial({ color: 0x4d91c6, transparent: true, opacity: .22 });
+        [0, Math.PI / 3].forEach((rotation, index) => {
+          const ring = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(
+            Array.from({ length: 96 }, (_, step) => {
+              const angle = step / 96 * Math.PI * 2;
+              return new THREE.Vector3(Math.cos(angle) * radius * (index ? .82 : 1.05), 0, Math.sin(angle) * radius * (index ? .82 : 1.05));
+            })
+          ), ringMaterial.clone());
+          ring.rotation.x = rotation + (index ? .55 : 0);
+          world.add(ring);
+        });
+
+        const nodeMeshes = new Map();
+        const labelElements = new Map();
+        const edgeObjects = [];
+        const sphereGeometry = new THREE.SphereGeometry(Math.max(.08, radius * .025), 18, 14);
+        const outlineGeometry = new THREE.SphereGeometry(Math.max(.10, radius * .031), 18, 14);
+        nodes.forEach((node, index) => {
+          const group = new THREE.Group();
+          group.position.set(node.x, node.y, node.z);
+          group.userData.id = String(node.id);
+          const outline = new THREE.Mesh(outlineGeometry, new THREE.MeshBasicMaterial({ color: node.outline, transparent: true, opacity: .95 }));
+          const core = new THREE.Mesh(sphereGeometry, new THREE.MeshStandardMaterial({ color: node.fill, emissive: node.fill, emissiveIntensity: .18, roughness: .32, metalness: .08, transparent: true, opacity: 1 }));
+          group.add(outline, core);
+          world.add(group);
+          nodeMeshes.set(String(node.id), { group, outline, core, node });
+          const label = document.createElement("div");
+          label.className = "sphere-label";
+          label.textContent = node.label;
+          labelsLayer.appendChild(label);
+          labelElements.set(String(node.id), { element: label, overview: index < Math.min(10, nodes.length) });
+          const button = document.createElement("button");
+          button.type = "button"; button.textContent = `Select ${node.label}`;
+          button.addEventListener("click", (event) => selectNode(String(node.id), event));
+          accessible.appendChild(button);
+        });
+        edges.forEach((edge) => {
+          const source = nodeMeshes.get(String(edge.source))?.group.position;
+          const target = nodeMeshes.get(String(edge.target))?.group.position;
+          if (!source || !target) return;
+          const geometry = new THREE.BufferGeometry().setFromPoints([source, target]);
+          const material = edge.dashed
+            ? new THREE.LineDashedMaterial({ color: edge.color, dashSize: .12, gapSize: .08, transparent: true, opacity: .35 })
+            : new THREE.LineBasicMaterial({ color: edge.color, transparent: true, opacity: .35 });
+          const line = new THREE.Line(geometry, material);
+          if (edge.dashed) line.computeLineDistances();
+          world.add(line);
+          edgeObjects.push({ edge, line, material });
+        });
+
+        const raycaster = new THREE.Raycaster();
+        const pointer = new THREE.Vector2();
+        let dragging = false, moved = false, startX = 0, startY = 0, zoom = 1;
+        function connectedIds(focused) {
+          const ids = new Set([focused]);
+          edges.forEach((edge) => { if (String(edge.source) === focused || String(edge.target) === focused) { ids.add(String(edge.source)); ids.add(String(edge.target)); } });
+          return ids;
+        }
+        function updateFocus() {
+          const focused = getFocused();
+          const related = focused ? connectedIds(focused) : null;
+          nodeMeshes.forEach(({ outline, core }, id) => {
+            const active = !related || related.has(id);
+            const isFocused = id === focused, neighbor = Boolean(related && !isFocused && related.has(id));
+            outline.material.color.set(isFocused ? "#f8fafc" : neighbor ? "#38bdf8" : nodeMeshes.get(id).node.outline);
+            outline.material.opacity = active ? 1 : .08;
+            core.material.opacity = active ? 1 : .08;
+            core.scale.setScalar(isFocused ? 1.45 : 1);
+          });
+          edgeObjects.forEach(({ edge, material }) => {
+            const active = !focused || String(edge.source) === focused || String(edge.target) === focused;
+            const incoming = String(edge.target) === focused;
+            material.opacity = active ? .95 : .045;
+            material.color.set(incoming ? "#fb7185" : String(edge.source) === focused ? "#38bdf8" : edge.color);
+          });
+        }
+        function resize() {
+          const width = Math.max(1, host.clientWidth), height = Math.max(480, host.clientHeight);
+          renderer.setSize(width, height, false);
+          camera.aspect = width / height;
+          camera.updateProjectionMatrix();
+        }
+        function updateLabels() {
+          const focused = getFocused(), related = focused ? connectedIds(focused) : null;
+          const occupied = [];
+          nodeMeshes.forEach(({ group }, id) => {
+            const label = labelElements.get(id);
+            const point = group.getWorldPosition(new THREE.Vector3()).project(camera);
+            const visible = point.z < 1 && point.z > -1 && (!related ? label.overview : related.has(id));
+            if (!visible) { label.element.style.display = "none"; return; }
+            const x = (point.x * .5 + .5) * host.clientWidth, y = (-point.y * .5 + .5) * host.clientHeight;
+            const collision = occupied.some(([px, py]) => Math.hypot(px - x, py - y) < 48);
+            if (collision && id !== focused) { label.element.style.display = "none"; return; }
+            occupied.push([x, y]);
+            label.element.style.display = "block";
+            label.element.style.transform = `translate(-50%, -50%) translate(${x}px, ${y - 15}px)`;
+          });
+        }
+        function animate() {
+          if (version !== renderVersion) { renderer.dispose(); return; }
+          orb.rotation.y += .002;
+          camera.position.z = radius * 3.55 / zoom;
+          camera.lookAt(0, 0, 0);
+          updateFocus();
+          renderer.render(scene, camera);
+          updateLabels();
+          requestAnimationFrame(animate);
+        }
+        canvas.addEventListener("pointerdown", (event) => { dragging = true; moved = false; startX = event.clientX; startY = event.clientY; canvas.setPointerCapture(event.pointerId); canvas.classList.add("dragging"); });
+        canvas.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          const dx = event.clientX - startX, dy = event.clientY - startY;
+          if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+          world.rotation.y += dx * .008;
+          world.rotation.x = Math.max(-1.25, Math.min(1.25, world.rotation.x + dy * .008));
+          startX = event.clientX; startY = event.clientY;
+        });
+        canvas.addEventListener("pointerup", (event) => {
+          dragging = false; canvas.classList.remove("dragging"); if (moved) return;
+          const rect = canvas.getBoundingClientRect();
+          pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(pointer, camera);
+          const hit = raycaster.intersectObjects([...nodeMeshes.values()].map((entry) => entry.core), false)[0];
+          if (hit) selectNode(hit.object.parent.userData.id); else clearFocus(true);
+        });
+        canvas.addEventListener("wheel", (event) => { event.preventDefault(); zoom = Math.max(.55, Math.min(2.3, zoom * (event.deltaY > 0 ? .91 : 1.1))); }, { passive: false });
+        new ResizeObserver(resize).observe(host);
+        resize(); animate();
       }
 
       function render(args) {
         const contextId = String(args.context_id || "");
         if (contextId !== lastContextId) {
-          if (lastContextId) {
-            removeStoredValue(focusStorageKey(lastContextId, "node"));
-            removeStoredValue(focusStorageKey(lastContextId, "clear"));
-          }
-          pendingFocusId = readStoredValue(focusStorageKey(contextId, "node"));
-          pendingClear = readStoredValue(focusStorageKey(contextId, "clear")) === "1";
+          if (lastContextId) { removeStored(storageKey(lastContextId, "node")); removeStored(storageKey(lastContextId, "clear")); }
+          pendingFocusId = readStored(storageKey(contextId, "node"));
+          pendingClear = readStored(storageKey(contextId, "clear")) === "1";
           lastContextId = contextId;
         }
-        host.innerHTML = sanitizeSvg(args.svg);
-        const svgRoot = host.querySelector("svg");
-        if (svgRoot) {
-          svgRoot.setAttribute("role", "group");
-          svgRoot.setAttribute("aria-label", "Interactive Boolean network. Tab to a node and press Enter or Space to select it.");
-        }
-        const nodes = [...host.querySelectorAll("g.node")];
-        const edges = [...host.querySelectorAll("g.edge")];
-        let focusedNodeId = null;
-
-        [...nodes, ...edges].forEach((element) => {
-          const title = element.querySelector("title");
-          element.dataset.graphId = title ? title.textContent.trim() : "";
-        });
-        host.querySelectorAll("title").forEach((title) => title.remove());
-        const nodeLabels = new Map(nodes.map((node) => [
-          node.dataset.graphId,
-          [...node.querySelectorAll("text")].map((text) => text.textContent.trim()).filter(Boolean).join(" ") || node.dataset.graphId,
-        ]));
-        nodes.forEach((node) => {
-          node.setAttribute("role", "button");
-          node.setAttribute("tabindex", "0");
-          node.setAttribute(
-            "aria-label",
-            `Node ${nodeLabels.get(node.dataset.graphId)}. Press Enter or Space to select.`,
-          );
-        });
-        edges.forEach((edge) => {
-          const [source, target] = edgeEndpoints(edge);
-          edge.setAttribute(
-            "aria-label",
-            `Edge from ${nodeLabels.get(source) || source} to ${nodeLabels.get(target) || target}`,
-          );
-        });
-
-        function graphId(element) {
-          return element.dataset.graphId || "";
-        }
-
-        function edgeEndpoints(edge) {
+        const isSphere = args.view_mode === "3D sphere";
+        const sphere = args.sphere_data || { nodes: [], edges: [] };
+        const nodeById = new Map((sphere.nodes || []).map((node) => [String(node.id), node]));
+        let focusedNodeId = null, svgNodes = [], svgEdges = [], drawSphere = () => {};
+        const graphId = (element) => element.dataset.graphId || "";
+        const edgeEndpoints = (edge) => {
           const parts = graphId(edge).split("->");
-          return parts.length === 2
-            ? parts.map((part) => part.trim().replace(/:(n|ne|e|se|s|sw|w|nw|c|_)$/i, ""))
-            : [];
+          return parts.length === 2 ? parts.map((part) => part.trim().replace(/:(n|ne|e|se|s|sw|w|nw|c|_)$/i, "")) : [];
+        };
+        const relation = (nodeId) => {
+          const ids = new Set([nodeId]), edges = new Set();
+          (sphere.edges || []).forEach((edge) => {
+            if (String(edge.source) === nodeId || String(edge.target) === nodeId) { ids.add(String(edge.source)); ids.add(String(edge.target)); edges.add(edge); }
+          });
+          return { ids, edges };
+        };
+        function applySvgFocus() {
+          const related = focusedNodeId ? relation(focusedNodeId) : null;
+          svgNodes.forEach((node) => {
+            const id = graphId(node), focused = id === focusedNodeId;
+            node.classList.toggle("focused", focused);
+            node.classList.toggle("neighbor", Boolean(related && !focused && related.ids.has(id)));
+            node.classList.toggle("dimmed", Boolean(related && !related.ids.has(id)));
+            if (focused) node.setAttribute("aria-current", "true"); else node.removeAttribute("aria-current");
+          });
+          svgEdges.forEach((edge) => {
+            const [source, target] = edgeEndpoints(edge), connected = Boolean(related && (source === focusedNodeId || target === focusedNodeId));
+            edge.classList.toggle("connected", connected); edge.classList.toggle("dimmed", Boolean(related && !connected));
+            edge.classList.toggle("incoming", target === focusedNodeId); edge.classList.toggle("outgoing", source === focusedNodeId);
+          });
         }
-
-        function clearFocus(notifyParent = false) {
-          const wasFocused = Boolean(focusedNodeId || pendingFocusId);
-          focusedNodeId = null;
-          nodes.forEach((node) => node.classList.remove("dimmed", "focused", "neighbor"));
-          nodes.forEach((node) => node.removeAttribute("aria-current"));
-          edges.forEach((edge) => edge.classList.remove(
-            "dimmed", "connected", "incoming", "outgoing"
-          ));
-          if (notifyParent && wasFocused) {
-            pendingFocusId = "";
-            pendingClear = true;
-            removeStoredValue(focusStorageKey(contextId, "node"));
-            writeStoredValue(focusStorageKey(contextId, "clear"), "1");
-            const eventId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
-            setComponentValue({ clear_focus: true, event_id: eventId });
+        function setFocus(nodeId) { focusedNodeId = nodeId || null; if (isSphere) drawSphere(); else applySvgFocus(); }
+        function clearFocus(notify = false) {
+          const wasFocused = Boolean(focusedNodeId || pendingFocusId); setFocus("");
+          if (notify && wasFocused) {
+            pendingFocusId = ""; pendingClear = true; removeStored(storageKey(contextId, "node")); writeStored(storageKey(contextId, "clear"), "1");
+            send("streamlit:setComponentValue", { value: { clear_focus: true, event_id: eventId() } });
           }
         }
-
-        function focusNode(node) {
-          const nodeId = graphId(node);
-          if (!nodeId) return;
-
-          focusedNodeId = nodeId;
-          const relatedIds = new Set([nodeId]);
-          const relatedEdges = new Set();
-          edges.forEach((edge) => {
-            const [source, target] = edgeEndpoints(edge);
-            if (source === nodeId || target === nodeId) {
-              relatedIds.add(source);
-              relatedIds.add(target);
-              relatedEdges.add(edge);
-            }
-          });
-
-          nodes.forEach((item) => {
-            const isFocused = graphId(item) === nodeId;
-            item.classList.toggle("focused", isFocused);
-            item.classList.toggle("neighbor", !isFocused && relatedIds.has(graphId(item)));
-            item.classList.toggle("dimmed", !relatedIds.has(graphId(item)));
-            if (isFocused) item.setAttribute("aria-current", "true");
-            else item.removeAttribute("aria-current");
-          });
-          edges.forEach((edge) => {
-            const [source, target] = edgeEndpoints(edge);
-            const isConnected = relatedEdges.has(edge);
-            edge.classList.toggle("connected", isConnected);
-            edge.classList.toggle("dimmed", !isConnected);
-            edge.classList.toggle("incoming", target === nodeId);
-            edge.classList.toggle("outgoing", source === nodeId);
-          });
+        function selectNode(nodeId, event) {
+          event?.stopPropagation(); if (!nodeId) return;
+          setFocus(nodeId); pendingFocusId = nodeId; pendingClear = false;
+          writeStored(storageKey(contextId, "node"), nodeId); removeStored(storageKey(contextId, "clear"));
+          send("streamlit:setComponentValue", { value: { node_id: nodeId, event_id: eventId() } });
         }
 
-        function selectNode(node, event) {
-          event.stopPropagation();
-          focusNode(node);
-          pendingFocusId = graphId(node);
-          pendingClear = false;
-          writeStoredValue(focusStorageKey(contextId, "node"), pendingFocusId);
-          removeStoredValue(focusStorageKey(contextId, "clear"));
-          const eventId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
-          setComponentValue({ node_id: graphId(node), event_id: eventId });
-        }
-
-        nodes.forEach((node) => {
-          node.addEventListener("click", (event) => selectNode(node, event));
-          node.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              selectNode(node, event);
-            }
+        if (!isSphere) {
+          host.innerHTML = sanitizeSvg(args.svg);
+          const svgRoot = host.querySelector("svg");
+          if (svgRoot) { svgRoot.setAttribute("role", "group"); svgRoot.setAttribute("aria-label", "Interactive Boolean network. Tab to a node and press Enter or Space to select it."); }
+          svgNodes = [...host.querySelectorAll("g.node")]; svgEdges = [...host.querySelectorAll("g.edge")];
+          [...svgNodes, ...svgEdges].forEach((element) => { const title = element.querySelector("title"); element.dataset.graphId = title ? title.textContent.trim() : ""; });
+          host.querySelectorAll("title").forEach((title) => title.remove());
+          const labels = new Map(svgNodes.map((node) => [graphId(node), [...node.querySelectorAll("text")].map((text) => text.textContent.trim()).filter(Boolean).join(" ") || graphId(node)]));
+          svgNodes.forEach((node) => {
+            node.setAttribute("role", "button"); node.setAttribute("tabindex", "0"); node.setAttribute("aria-label", `Node ${labels.get(graphId(node))}. Press Enter or Space to select.`);
+            node.addEventListener("click", (event) => selectNode(graphId(node), event));
+            node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectNode(graphId(node), event); } });
           });
-        });
-        host.querySelector("svg")?.addEventListener("click", () => clearFocus(true));
-
+          svgRoot?.addEventListener("click", () => clearFocus(true));
+        } else {
+          host.innerHTML = '<canvas class="sphere-canvas" aria-label="Interactive 3D Boolean network. Drag to rotate, scroll to zoom, and click a node to select it."></canvas><div class="sphere-help">Drag to rotate · Scroll to zoom · Click a node to focus</div><div class="sphere-accessible" role="group" aria-label="3D Boolean network"></div>';
+          const canvas = host.querySelector("canvas"), accessible = host.querySelector(".sphere-accessible"), context = canvas.getContext("2d");
+          (sphere.nodes || []).forEach((node) => { const button = document.createElement("button"); button.type = "button"; button.textContent = `Select ${node.label}`; button.addEventListener("click", (event) => selectNode(String(node.id), event)); accessible.appendChild(button); });
+          const nodeCount = (sphere.nodes || []).length;
+          const nodeSizeScale = nodeCount <= 40 ? 5 : nodeCount <= 70 ? 3 : 2;
+          const radius = Math.max(...(sphere.nodes || []).map((node) => Math.hypot(node.x, node.y, node.z)), 1);
+          // Scale by the sphere radius as well as camera depth. This keeps the
+          // complete model in frame at its initial rotation, including labels.
+          let yaw = -.65, pitch = .35, zoom = 1.8, dragging = false, moved = false, startX = 0, startY = 0, screenNodes = [];
+          function project(node, width, height) {
+            const yc = Math.cos(yaw), ys = Math.sin(yaw), pc = Math.cos(pitch), ps = Math.sin(pitch);
+            const x1 = node.x * yc + node.z * ys, z1 = -node.x * ys + node.z * yc, y1 = node.y * pc - z1 * ps, z2 = node.y * ps + z1 * pc;
+            const depth = 3.15 - z2 / radius, scale = Math.min(width, height) * .72 * zoom / (radius * depth);
+            const depthFraction = Math.max(0, Math.min(1, (z2 / radius + 1) / 2));
+            const baseRadius = Math.max(4.5 * nodeSizeScale, Math.min(9 * nodeSizeScale, 6.4 * nodeSizeScale * zoom / depth));
+            return { ...node, sx: width / 2 + x1 * scale, sy: height / 2 - y1 * scale, depth: z2, r: Math.max(3 * nodeSizeScale, Math.min(12 * nodeSizeScale, baseRadius * (.62 + depthFraction * .88))) };
+          }
+          drawSphere = () => {
+            const rect = canvas.getBoundingClientRect(), width = Math.max(1, rect.width), height = Math.max(1, rect.height), dpr = devicePixelRatio || 1;
+            if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) { canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr); }
+            context.setTransform(dpr, 0, 0, dpr, 0, 0); context.clearRect(0, 0, width, height);
+            screenNodes = (sphere.nodes || []).map((node) => project(node, width, height));
+            const projected = new Map(screenNodes.map((node) => [String(node.id), node])), related = focusedNodeId ? relation(focusedNodeId) : null;
+            context.save(); context.strokeStyle = "rgba(100,116,139,.32)"; context.lineWidth = 1; context.setLineDash([2, 6]);
+            const drawGuideRing = (pointAt) => {
+              context.beginPath();
+              for (let step = 0; step <= 96; step += 1) {
+                const point = project(pointAt(step / 96 * Math.PI * 2), width, height);
+                if (step === 0) context.moveTo(point.sx, point.sy); else context.lineTo(point.sx, point.sy);
+              }
+              context.stroke();
+            };
+            drawGuideRing((angle) => ({ x: radius * Math.cos(angle), y: radius * Math.sin(angle), z: 0 }));
+            drawGuideRing((angle) => ({ x: radius * Math.cos(angle), y: 0, z: radius * Math.sin(angle) }));
+            context.restore();
+            [...(sphere.edges || [])].sort((a, b) => ((projected.get(String(a.source))?.depth || 0) + (projected.get(String(a.target))?.depth || 0)) - ((projected.get(String(b.source))?.depth || 0) + (projected.get(String(b.target))?.depth || 0))).forEach((edge) => {
+              const source = projected.get(String(edge.source)), target = projected.get(String(edge.target)); if (!source || !target) return;
+              const connected = related && (String(edge.source) === focusedNodeId || String(edge.target) === focusedNodeId);
+              const edgeDepth = Math.max(0, Math.min(1, ((source.depth + target.depth) / 2 / radius + 1) / 2));
+              const opacity = related && !connected ? .08 : .16 + .76 * edgeDepth;
+              let color = edge.color || "#111827", dashed = edge.dashed;
+              if (connected) { color = String(edge.target) === focusedNodeId ? "#be123c" : "#0891b2"; dashed = String(edge.target) === focusedNodeId; }
+              const dx = target.sx - source.sx, dy = target.sy - source.sy, length = Math.hypot(dx, dy) || 1, ux = dx / length, uy = dy / length, endX = target.sx - ux * (target.r + 3), endY = target.sy - uy * (target.r + 3);
+              context.save(); context.globalAlpha = opacity; context.strokeStyle = color; context.fillStyle = color; context.lineWidth = Math.max(.65, (Number(edge.width) || 1) * (.55 + .65 * edgeDepth)); context.setLineDash(dashed ? [6, 4] : []);
+              context.beginPath(); context.moveTo(source.sx + ux * (source.r + 2), source.sy + uy * (source.r + 2)); context.lineTo(endX, endY); context.stroke(); context.setLineDash([]);
+              context.beginPath(); context.moveTo(endX, endY); context.lineTo(endX - ux * 8 - uy * 4, endY - uy * 8 + ux * 4); context.lineTo(endX - ux * 8 + uy * 4, endY - uy * 8 - ux * 4); context.closePath(); context.fill(); context.restore();
+            });
+            [...screenNodes].sort((a, b) => a.depth - b.depth).forEach((node) => {
+              const focused = String(node.id) === focusedNodeId, neighbor = Boolean(related && !focused && related.ids.has(String(node.id))), dimmed = Boolean(related && !related.ids.has(String(node.id)));
+              const depthFraction = Math.max(0, Math.min(1, (node.depth / radius + 1) / 2));
+              const perspectiveRadius = node.r;
+              context.save(); context.globalAlpha = dimmed ? .13 : .32 + .68 * depthFraction;
+              context.beginPath(); context.arc(node.sx + perspectiveRadius * .18, node.sy + perspectiveRadius * .22, perspectiveRadius, 0, Math.PI * 2); context.fillStyle = "rgba(15,23,42,.16)"; context.fill();
+              context.beginPath(); context.arc(node.sx, node.sy, perspectiveRadius, 0, Math.PI * 2); context.fillStyle = node.fill; context.fill();
+              const highlight = context.createRadialGradient(node.sx - perspectiveRadius * .35, node.sy - perspectiveRadius * .4, perspectiveRadius * .08, node.sx, node.sy, perspectiveRadius);
+              highlight.addColorStop(0, `rgba(255,255,255,${.18 + depthFraction * .38})`); highlight.addColorStop(1, `rgba(15,23,42,${.34 - depthFraction * .24})`);
+              context.beginPath(); context.arc(node.sx, node.sy, perspectiveRadius, 0, Math.PI * 2); context.fillStyle = highlight; context.fill();
+              context.strokeStyle = focused ? "#0f172a" : (neighbor ? "#2563eb" : node.outline); context.lineWidth = focused ? 4 : (neighbor ? 3 : 2); if (neighbor) context.setLineDash([4,3]); context.stroke(); context.setLineDash([]);
+              if (!dimmed && (node.depth > -radius * .18 || focused || neighbor) && ((sphere.nodes || []).length <= 70 || focused || neighbor)) { context.fillStyle = "#1e293b"; context.font = "600 10px Helvetica, Arial, sans-serif"; context.textAlign = "center"; context.fillText(node.label, node.sx, node.sy - perspectiveRadius - 5); }
+              context.restore();
+            });
+          };
+          canvas.addEventListener("pointerdown", (event) => { dragging = true; moved = false; startX = event.clientX; startY = event.clientY; canvas.setPointerCapture(event.pointerId); canvas.classList.add("dragging"); });
+          canvas.addEventListener("pointermove", (event) => { if (!dragging) return; const dx = event.clientX - startX, dy = event.clientY - startY; if (Math.abs(dx) + Math.abs(dy) > 2) moved = true; yaw += dx * .008; pitch = Math.max(-1.45, Math.min(1.45, pitch + dy * .008)); startX = event.clientX; startY = event.clientY; drawSphere(); });
+          canvas.addEventListener("pointerup", (event) => { dragging = false; canvas.classList.remove("dragging"); if (moved) return; const rect = canvas.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top; const hit = [...screenNodes].sort((a,b) => b.depth - a.depth).find((node) => Math.hypot(node.sx - x, node.sy - y) <= node.r + 5); if (hit) selectNode(String(hit.id)); else clearFocus(true); });
+          canvas.addEventListener("pointercancel", () => { dragging = false; canvas.classList.remove("dragging"); });
+          canvas.addEventListener("wheel", (event) => { event.preventDefault(); zoom = Math.max(1, Math.min(3.25, zoom * (event.deltaY > 0 ? .92 : 1.08))); drawSphere(); }, { passive: false });
+          requestAnimationFrame(drawSphere);
+        }
         const serverFocusId = String(args.focused_node_id || "");
         if (pendingClear) {
           clearFocus();
-          if (!serverFocusId) {
-            pendingClear = false;
-            removeStoredValue(focusStorageKey(contextId, "clear"));
-          }
+          if (!serverFocusId) { pendingClear = false; removeStored(storageKey(contextId, "clear")); }
         } else {
-          // A click event reaches Python after this render is requested, so
-          // serverFocusId can still identify the previous node. The locally
-          // stored click survives an iframe remount until Python confirms it.
-          const requestedFocusId = pendingFocusId || serverFocusId;
-          const selectedNode = nodes.find((node) => graphId(node) === requestedFocusId);
-          if (selectedNode) {
-            focusNode(selectedNode);
-            if (serverFocusId && serverFocusId === pendingFocusId) {
-              pendingFocusId = "";
-              removeStoredValue(focusStorageKey(contextId, "node"));
-            }
-          } else {
-            const hadPendingFocus = Boolean(pendingFocusId);
-            pendingFocusId = "";
-            if (hadPendingFocus) removeStoredValue(focusStorageKey(contextId, "node"));
-            clearFocus();
-          }
+          const requested = pendingFocusId || serverFocusId;
+          const exists = isSphere ? nodeById.has(requested) : svgNodes.some((node) => graphId(node) === requested);
+          if (requested && exists) {
+            setFocus(requested);
+            if (serverFocusId && serverFocusId === pendingFocusId) { pendingFocusId = ""; removeStored(storageKey(contextId, "node")); }
+          } else if (requested) { pendingFocusId = ""; removeStored(storageKey(contextId, "node")); clearFocus(); }
         }
         requestAnimationFrame(updateFrameHeight);
       }
-
-      window.addEventListener("message", (event) => {
-        if (event.source !== window.parent) return;
-        if (parentOrigin !== "*" && event.origin !== parentOrigin) return;
-        if (event.data?.type === "streamlit:render") render(event.data.args || {});
-      });
-      window.addEventListener("resize", updateFrameHeight);
-      sendMessage("streamlit:componentReady", { apiVersion: 1 });
+      addEventListener("message", (event) => { if (event.source === parent && (parentOrigin === "*" || event.origin === parentOrigin) && event.data?.type === "streamlit:render") render(event.data.args || {}); });
+      addEventListener("resize", updateFrameHeight);
+      send("streamlit:componentReady", { apiVersion: 1 });
     </script>
   </body>
 </html>

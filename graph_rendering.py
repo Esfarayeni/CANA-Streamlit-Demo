@@ -38,7 +38,7 @@ NODE_COLOR_MAP.set_under("#2ca02c")
 _COMPASS = ["e", "ne", "n", "nw", "w", "sw", "s", "se"]
 
 NETWORK_GRAPH_COMPONENT = components.declare_component(
-    "network_graph_component",
+    "network_graph_component_v4",
     path=str(Path(__file__).resolve().parent / "network_graph_component"),
 )
 
@@ -51,18 +51,28 @@ def graphviz_svg_from_source(source: str, engine: str = "dot") -> str:
     return re.sub(r"<!DOCTYPE[^>]*>", "", svg, flags=re.IGNORECASE).strip()
 
 
-def render_clickable_network_graph(graph: graphviz.Digraph, focused_node_id: object, context_id: object) -> dict[str, Any]:
-    """Render the interactive component and return its most recent node event."""
-    try:
-        svg = graphviz_svg_from_source(graph.source, graph.engine)
-    except graphviz.backend.execute.CalledProcessError:
-        st.warning(
-            "This model's network graph could not be rendered. Try another metric "
-            "or model; the rest of the explorer remains available."
-        )
-        return {}
+def render_clickable_network_graph(
+    graph: graphviz.Digraph,
+    focused_node_id: object,
+    context_id: object,
+    view_mode: str = "2D",
+    sphere_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Render either the original Graphviz view or the interactive spherical view."""
+    svg = ""
+    if view_mode == "2D":
+        try:
+            svg = graphviz_svg_from_source(graph.source, graph.engine)
+        except graphviz.backend.execute.CalledProcessError:
+            st.warning(
+                "This model's network graph could not be rendered. Try another metric "
+                "or model; the rest of the explorer remains available."
+            )
+            return {}
     return NETWORK_GRAPH_COMPONENT(
         svg=svg,
+        view_mode=view_mode,
+        sphere_data=sphere_data or {},
         focused_node_id=str(focused_node_id or ""),
         context_id=str(context_id or ""),
         key="network-graph-component",
@@ -84,6 +94,89 @@ def circular_positions(graph: Any, radius: float = RADIUS) -> tuple[list[Any], d
         for index, node_id in enumerate(sorted_nodes)
     }
     return sorted_nodes, positions
+
+
+def spherical_positions(graph: Any, radius: float = RADIUS) -> tuple[list[Any], dict[Any, tuple[float, float, float]]]:
+    """Place nodes uniformly on a deterministic Fibonacci sphere."""
+    nodes = list(graph.nodes())
+    if not nodes:
+        return [], {}
+    sorted_nodes = sorted(nodes, key=lambda node_id: graph.nodes[node_id].get("label", str(node_id)))
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+    positions = {}
+    for index, node_id in enumerate(sorted_nodes):
+        z_position = 1.0 - (2.0 * (index + 0.5) / len(sorted_nodes))
+        ring_radius = math.sqrt(max(0.0, 1.0 - z_position * z_position))
+        angle = golden_angle * index
+        positions[node_id] = (
+            radius * ring_radius * math.cos(angle),
+            radius * ring_radius * math.sin(angle),
+            radius * z_position,
+        )
+    return sorted_nodes, positions
+
+
+def _node_fill_color(value: float, maximum: float, zero_is_nonpositive: bool) -> str:
+    zero_value = value <= 0 if zero_is_nonpositive else value == 0
+    if zero_value:
+        return "#2ca02c"
+    normalizer = mpl.colors.Normalize(vmin=1e-16, vmax=maximum if maximum > 0 else 1.0)
+    return mpl.colors.rgb2hex(NODE_COLOR_MAP(normalizer(value)))
+
+
+def spherical_graph_data(
+    source_graph: Any,
+    node_values: dict[Any, float],
+    special_nodes: set[Any],
+    isolated_nodes: set[Any],
+    metric: str,
+    threshold: float,
+    edge_values: dict[tuple[Any, Any], float] | None = None,
+    minimum: float = 0.0,
+    maximum: float = 1.0,
+) -> dict[str, Any]:
+    """Build JSON-safe node and visible-edge data for the canvas sphere renderer."""
+    del minimum  # Kept for symmetry with the 2D metric-rendering inputs.
+    _, positions = spherical_positions(source_graph)
+    zero_is_nonpositive = metric != "Edge effectiveness"
+    node_maximum = max(node_values.values()) if node_values else 1.0
+    nodes = []
+    for node_id, (x_position, y_position, z_position) in positions.items():
+        value = float(node_values.get(node_id, 0.0))
+        nodes.append({
+            "id": str(node_id),
+            "label": str(source_graph.nodes[node_id].get("label", node_id)),
+            "x": x_position,
+            "y": y_position,
+            "z": z_position,
+            "fill": _node_fill_color(value, node_maximum, zero_is_nonpositive),
+            "outline": (
+                ISOLATED_OUTLINE if node_id in isolated_nodes else
+                SPECIAL_OUTLINE if node_id in special_nodes else DEFAULT_OUTLINE
+            ),
+        })
+
+    edges = []
+    for source, target, data in source_graph.edges(data=True):
+        value = float(data.get("weight", 0.0)) if metric == "Edge effectiveness" else float((edge_values or {}).get((source, target), 0.0))
+        compared_value = abs(value) if metric == "Correlation" else value
+        is_zero = np.isclose(value, 0.0)
+        show_zero = metric in {"Edge effectiveness", "Activity", "Correlation"} and np.isclose(threshold, 0.0) and is_zero
+        if not show_zero and compared_value <= threshold:
+            continue
+        if show_zero:
+            width, color, dashed = 3.5, ZERO_EDGE_COLOR, True
+        elif metric == "Edge effectiveness":
+            width = max(0.5, min(PENWIDTH_MAX, PENWIDTH_MAX * value))
+            color, dashed = "#111827", False
+        else:
+            width = metric_to_width(abs(value) if metric == "Correlation" else value, 0.0, maximum)
+            color, dashed = "#111827", metric == "Correlation" and value < 0
+        edges.append({
+            "source": str(source), "target": str(target), "width": float(width),
+            "color": color, "dashed": dashed,
+        })
+    return {"nodes": nodes, "edges": edges}
 
 
 def _graph_with_standard_attributes(node_width_in: float) -> graphviz.Digraph:

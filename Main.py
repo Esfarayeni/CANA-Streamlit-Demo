@@ -51,13 +51,17 @@ from model_data import (
     validate_uploaded_network,
 )
 from metrics import (
-    compute_correlation_metrics,
-    compute_structural_metrics,
     detect_special_nodes,
     isolated_nodes_after_threshold,
     node_values_from_thresholded_effective,
     node_values_from_thresholded_structural,
     threshold_graph,
+)
+from metric_store import (
+    cached_correlation,
+    cached_effectiveness,
+    cached_structural_metrics,
+    effective_graph_from_values,
 )
 from graph_rendering import (
     add_edges_effective,
@@ -67,6 +71,7 @@ from graph_rendering import (
     circular_positions,
     render_clickable_network_graph,
     render_graph_legend,
+    spherical_graph_data,
 )
 from node_analysis import (
     format_node_parameter,
@@ -144,6 +149,15 @@ metric = st.sidebar.selectbox(
     on_change=clear_graph_focus,
 )
 
+graph_view = st.sidebar.radio(
+    "Network view",
+    ["2D", "3D sphere"],
+    index=0,
+    horizontal=True,
+    key="network_view",
+    help="In 2D, nodes are placed around a circle. In 3D, nodes sit on a rotatable sphere.",
+)
+
 degree_mode = st.sidebar.toggle("Use in-degree for node coloring", value=False, key="degree_toggle")
 degree_mode = "In-degree" if degree_mode else "Out-degree"
 
@@ -187,25 +201,26 @@ corr_abs_min, corr_abs_max = 0.0, 1.0
 
 try:
     if metric == "Edge effectiveness":
-        EG0 = session_cached(
+        edge_effectiveness, _ = session_cached(
             "_network_analysis_cache",
-            (current_model_cache_key, "effective_graph"),
-            bn.effective_graph,
+            (current_model_cache_key, "effectiveness"),
+            lambda: cached_effectiveness(current_model_cache_key, bn),
         )
+        EG0 = effective_graph_from_values(SG, edge_effectiveness)
     elif metric in {"Activity", "Excess canalization"}:
-        include_excess = metric == "Excess canalization"
-        structural_result = session_cached(
+        structural_metrics = session_cached(
             "_network_analysis_cache",
-            (current_model_cache_key, "structural_metrics", include_excess),
-            lambda: compute_structural_metrics(bn, include_excess=include_excess),
+            (current_model_cache_key, "structural_metrics"),
+            lambda: cached_structural_metrics(current_model_cache_key, bn),
         )
-        SG, edge_activity, (act_min, act_max), edge_excess, (ex_min, ex_max) = structural_result
+        edge_activity, (act_min, act_max), edge_excess, (ex_min, ex_max) = structural_metrics
     else:
-        SG_corr, edge_corr, (corr_abs_min, corr_abs_max) = session_cached(
+        edge_corr, (corr_abs_min, corr_abs_max) = session_cached(
             "_network_analysis_cache",
             (current_model_cache_key, "correlation"),
-            lambda: compute_correlation_metrics(bn),
+            lambda: cached_correlation(current_model_cache_key, bn),
         )
+        SG_corr = SG
 except Exception as e:
     st.error(f"Could not compute {metric.lower()} for this network: {e}")
     st.stop()
@@ -230,6 +245,7 @@ thr = st.sidebar.slider(
     "Threshold", float(thr_min), float(thr_max), float(thr_default), float(step),
     key="thr_slider",
     on_change=clear_graph_focus,
+    help="Only edges with a metric value above this cutoff are shown.",
 )
 
 node_size_in = adaptive_default
@@ -279,13 +295,13 @@ elif metric == "Activity":
     node_vals = node_values_from_thresholded_structural(
         SG, edge_activity, thr, degree_mode=degree_mode
     )
-    isolated = isolated_nodes_after_threshold(SG, edge_values=edge_activity, thr=thr)
+    isolated = isolated_nodes_after_threshold(SG, edge_values=edge_activity, threshold=thr)
 
     g, max_val = build_graphviz_structural(
         SG, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
     )
     add_edges_structural(
-        g, SG, edge_activity, act_min, act_max, pos, thr=thr,
+        g, SG, edge_activity, act_min, act_max, pos, threshold=thr,
         show_zero_dashed_at_zero_threshold=True,
         signed_color=False,
         threshold_on_abs=False,
@@ -304,13 +320,13 @@ elif metric == "Excess canalization":
     node_vals = node_values_from_thresholded_structural(
         SG, edge_excess, thr, degree_mode=degree_mode
     )
-    isolated = isolated_nodes_after_threshold(SG, edge_values=edge_excess, thr=thr)
+    isolated = isolated_nodes_after_threshold(SG, edge_values=edge_excess, threshold=thr)
 
     g, max_val = build_graphviz_structural(
         SG, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
     )
     add_edges_structural(
-        g, SG, edge_excess, ex_min, ex_max, pos, thr=thr,
+        g, SG, edge_excess, ex_min, ex_max, pos, threshold=thr,
         show_zero_dashed_at_zero_threshold=False,
         signed_color=False,
         threshold_on_abs=False,
@@ -327,15 +343,17 @@ else:
     pos = {n: pos[n] for n in nodes_order}
 
     node_vals = node_values_from_thresholded_structural(
-        SG_corr, edge_corr, thr, degree_mode=degree_mode, use_abs=True
+        SG_corr, edge_corr, thr, degree_mode=degree_mode, use_absolute_values=True
     )
-    isolated = isolated_nodes_after_threshold(SG_corr, edge_values=edge_corr, thr=thr, use_abs=True)
+    isolated = isolated_nodes_after_threshold(
+        SG_corr, edge_values=edge_corr, threshold=thr, use_absolute_values=True
+    )
 
     g, max_val = build_graphviz_structural(
         SG_corr, node_vals, special, pos, node_width_in=node_size_in, isolated_nodes=isolated
     )
     add_edges_structural(
-        g, SG_corr, edge_corr, corr_abs_min, corr_abs_max, pos, thr=thr,
+        g, SG_corr, edge_corr, corr_abs_min, corr_abs_max, pos, threshold=thr,
         show_zero_dashed_at_zero_threshold=True,
         signed_color=True,
         threshold_on_abs=True,
@@ -355,8 +373,29 @@ graph_node_name_by_id = {
     str(node_id): str(graph_source.nodes[node_id].get("label", node_id))
     for node_id in graph_source.nodes()
 }
+sphere_edge_values = {
+    "Activity": edge_activity,
+    "Excess canalization": edge_excess,
+    "Correlation": edge_corr,
+}.get(metric)
+sphere_metric_bounds = {
+    "Activity": (act_min, act_max),
+    "Excess canalization": (ex_min, ex_max),
+    "Correlation": (corr_abs_min, corr_abs_max),
+}.get(metric, (0.0, 1.0))
+sphere_data = spherical_graph_data(
+    graph_source,
+    node_vals,
+    special,
+    isolated,
+    metric,
+    thr,
+    edge_values=sphere_edge_values,
+    minimum=sphere_metric_bounds[0],
+    maximum=sphere_metric_bounds[1],
+)
 focus_reset_token = int(st.session_state.get("_graph_focus_reset_token", 0))
-graph_focus_context = f"overview-v4|{current_model_cache_key}|{focus_reset_token}"
+graph_focus_context = f"overview-v5|{current_model_cache_key}|{focus_reset_token}"
 
 # The sidebar callback marks deliberate selector changes before this script
 # runs. It avoids treating an initial render, model change, or graph click as
@@ -589,6 +628,8 @@ with c1:
         g,
         focused_graph_node_id,
         graph_focus_context,
+        view_mode=graph_view,
+        sphere_data=sphere_data,
     )
     if isinstance(graph_click_event, dict):
         click_event_id = str(graph_click_event.get("event_id", ""))
