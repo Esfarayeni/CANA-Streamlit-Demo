@@ -21,6 +21,13 @@
       #network-graph g.edge.outgoing polygon { fill: #0891b2 !important; stroke: #0891b2 !important; }
       .sphere-canvas { width: 100%; height: 100%; display: block; border-radius: 12px; background: #fff; touch-action: none; cursor: grab; }
       .sphere-canvas.dragging { cursor: grabbing; }
+      .sphere-controls { position: absolute; top: 12px; left: 12px; display: flex; align-items: center; gap: 5px; padding: 5px; border: 1px solid rgba(148,163,184,.48); border-radius: 10px; background: rgba(255,255,255,.94); box-shadow: 0 3px 12px rgba(15,23,42,.14); }
+      .sphere-control { min-width: 30px; height: 30px; padding: 0 7px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #0f172a; font: 700 16px/1 Helvetica, Arial, sans-serif; cursor: pointer; }
+      .sphere-control:hover { background: #eff6ff; border-color: #60a5fa; }
+      .sphere-control[aria-pressed="true"] { background: #dbeafe; border-color: #2563eb; color: #1d4ed8; }
+      .sphere-control:disabled { opacity: .42; cursor: default; }
+      .sphere-control.clear-focus { min-width: 30px; font-size: 16px; }
+      .sphere-control-divider { width: 1px; height: 20px; background: #cbd5e1; margin: 0 1px; }
       .sphere-help { position: absolute; right: 12px; bottom: 10px; padding: 5px 8px; border-radius: 8px; background: rgba(255,255,255,.85); color: #475569; font: 600 11px/1.2 Helvetica, Arial, sans-serif; pointer-events: none; }
       .sphere-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
       .sphere-label { position: absolute; color: #e2e8f0; font: 600 11px/1.1 Helvetica, Arial, sans-serif; text-shadow: 0 1px 4px #020617; white-space: nowrap; }
@@ -289,15 +296,16 @@
           });
           svgRoot?.addEventListener("click", () => clearFocus(true));
         } else {
-          host.innerHTML = '<canvas class="sphere-canvas" aria-label="Interactive 3D Boolean network. Drag to rotate, scroll to zoom, and click a node to select it."></canvas><div class="sphere-help">Drag to rotate · Scroll to zoom · Click a node to focus</div><div class="sphere-accessible" role="group" aria-label="3D Boolean network"></div>';
-          const canvas = host.querySelector("canvas"), accessible = host.querySelector(".sphere-accessible"), context = canvas.getContext("2d");
+          host.innerHTML = '<canvas class="sphere-canvas" aria-label="Interactive 3D Boolean network. Drag to rotate, scroll to zoom, and click a node to select it."></canvas><div class="sphere-controls" role="toolbar" aria-label="3D graph controls"><button class="sphere-control" type="button" data-action="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><button class="sphere-control" type="button" data-action="zoom-out" aria-label="Zoom out" title="Zoom out">−</button><button class="sphere-control" type="button" data-action="reset" aria-label="Reset overview" title="Reset overview">⌂</button><button class="sphere-control" type="button" data-action="spin" aria-label="Start automatic rotation" aria-pressed="false" title="Start automatic rotation">▶</button><span class="sphere-control-divider" aria-hidden="true"></span><button class="sphere-control clear-focus" type="button" data-action="clear-focus" aria-label="Clear node focus" title="Clear node focus">⊗</button></div><div class="sphere-help">Drag to rotate · Scroll to zoom · Click a node to focus</div><div class="sphere-accessible" role="group" aria-label="3D Boolean network"></div>';
+          const canvas = host.querySelector("canvas"), accessible = host.querySelector(".sphere-accessible"), controls = host.querySelector(".sphere-controls"), context = canvas.getContext("2d");
           (sphere.nodes || []).forEach((node) => { const button = document.createElement("button"); button.type = "button"; button.textContent = `Select ${node.label}`; button.addEventListener("click", (event) => selectNode(String(node.id), event)); accessible.appendChild(button); });
           const nodeCount = (sphere.nodes || []).length;
           const nodeSizeScale = nodeCount <= 40 ? 5 : nodeCount <= 70 ? 3 : 2;
           const radius = Math.max(...(sphere.nodes || []).map((node) => Math.hypot(node.x, node.y, node.z)), 1);
           // Scale by the sphere radius as well as camera depth. This keeps the
           // complete model in frame at its initial rotation, including labels.
-          let yaw = -.65, pitch = .35, zoom = 1.8, dragging = false, moved = false, startX = 0, startY = 0, screenNodes = [];
+          const defaultView = { yaw: -.65, pitch: .35, zoom: 1.8 };
+          let yaw = defaultView.yaw, pitch = defaultView.pitch, zoom = defaultView.zoom, autoSpin = false, dragging = false, moved = false, startX = 0, startY = 0, screenNodes = [];
           function project(node, width, height) {
             const yc = Math.cos(yaw), ys = Math.sin(yaw), pc = Math.cos(pitch), ps = Math.sin(pitch);
             const x1 = node.x * yc + node.z * ys, z1 = -node.x * ys + node.z * yc, y1 = node.y * pc - z1 * ps, z2 = node.y * ps + z1 * pc;
@@ -350,12 +358,41 @@
               if (!dimmed && (node.depth > -radius * .18 || focused || neighbor) && ((sphere.nodes || []).length <= 70 || focused || neighbor)) { context.fillStyle = "#1e293b"; context.font = "600 10px Helvetica, Arial, sans-serif"; context.textAlign = "center"; context.fillText(node.label, node.sx, node.sy - perspectiveRadius - 5); }
               context.restore();
             });
+            const clearButton = controls.querySelector('[data-action="clear-focus"]');
+            controls.querySelector('[data-action="zoom-out"]').disabled = zoom <= 1;
+            controls.querySelector('[data-action="zoom-in"]').disabled = zoom >= 3.25;
+            clearButton.disabled = !focusedNodeId;
           };
+          function setZoom(nextZoom) { zoom = Math.max(1, Math.min(3.25, nextZoom)); drawSphere(); }
+          function setAutoSpin(enabled) {
+            autoSpin = enabled;
+            const spinButton = controls.querySelector('[data-action="spin"]');
+            spinButton.setAttribute("aria-pressed", String(autoSpin));
+            spinButton.setAttribute("aria-label", autoSpin ? "Stop automatic rotation" : "Start automatic rotation");
+            spinButton.setAttribute("title", autoSpin ? "Stop automatic rotation" : "Start automatic rotation");
+            spinButton.textContent = autoSpin ? "❚❚" : "▶";
+            if (!autoSpin) return;
+            const spin = () => {
+              if (!autoSpin || !canvas.isConnected) return;
+              if (!dragging) { yaw += .006; drawSphere(); }
+              requestAnimationFrame(spin);
+            };
+            requestAnimationFrame(spin);
+          }
+          controls.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const action = event.target.closest("button")?.dataset.action;
+            if (action === "zoom-in") setZoom(zoom * 1.15);
+            if (action === "zoom-out") setZoom(zoom / 1.15);
+            if (action === "reset") { yaw = defaultView.yaw; pitch = defaultView.pitch; setZoom(defaultView.zoom); }
+            if (action === "spin") setAutoSpin(!autoSpin);
+            if (action === "clear-focus") clearFocus(true);
+          });
           canvas.addEventListener("pointerdown", (event) => { dragging = true; moved = false; startX = event.clientX; startY = event.clientY; canvas.setPointerCapture(event.pointerId); canvas.classList.add("dragging"); });
           canvas.addEventListener("pointermove", (event) => { if (!dragging) return; const dx = event.clientX - startX, dy = event.clientY - startY; if (Math.abs(dx) + Math.abs(dy) > 2) moved = true; yaw += dx * .008; pitch = Math.max(-1.45, Math.min(1.45, pitch + dy * .008)); startX = event.clientX; startY = event.clientY; drawSphere(); });
           canvas.addEventListener("pointerup", (event) => { dragging = false; canvas.classList.remove("dragging"); if (moved) return; const rect = canvas.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top; const hit = [...screenNodes].sort((a,b) => b.depth - a.depth).find((node) => Math.hypot(node.sx - x, node.sy - y) <= node.r + 5); if (hit) selectNode(String(hit.id)); else clearFocus(true); });
           canvas.addEventListener("pointercancel", () => { dragging = false; canvas.classList.remove("dragging"); });
-          canvas.addEventListener("wheel", (event) => { event.preventDefault(); zoom = Math.max(1, Math.min(3.25, zoom * (event.deltaY > 0 ? .92 : 1.08))); drawSphere(); }, { passive: false });
+          canvas.addEventListener("wheel", (event) => { event.preventDefault(); setZoom(zoom * (event.deltaY > 0 ? .92 : 1.08)); }, { passive: false });
           requestAnimationFrame(drawSphere);
         }
         const serverFocusId = String(args.focused_node_id || "");
