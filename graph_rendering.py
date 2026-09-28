@@ -236,11 +236,11 @@ def _add_nodes(
     isolated_nodes: set[Any],
     zero_is_nonpositive: bool,
 ) -> float:
-    for node_id, (x_position, y_position) in positions.items():
+    for node_id in source_graph.nodes():
         node_values.setdefault(node_id, 0.0)
     maximum = max(node_values.values()) if node_values else 1.0
     normalizer = mpl.colors.Normalize(vmin=1e-16, vmax=maximum if maximum > 0 else 1.0)
-    for node_id in source_graph.nodes():
+    for node_id, (x_position, y_position) in positions.items():
         value = node_values.get(node_id, 0.0)
         zero_value = value <= 0 if zero_is_nonpositive else value == 0
         fill = "#2ca02c" if zero_value else mpl.colors.rgb2hex(NODE_COLOR_MAP(normalizer(value)))
