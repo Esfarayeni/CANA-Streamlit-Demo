@@ -179,20 +179,32 @@ def spherical_graph_data(
     return {"nodes": nodes, "edges": edges}
 
 
-def _graph_with_standard_attributes(node_width_in: float) -> graphviz.Digraph:
+def _graph_with_standard_attributes(
+    node_width_in: float, fixed_positions: bool
+) -> graphviz.Digraph:
+    """Create a graph canvas, optionally letting neato arrange the nodes."""
     graph = graphviz.Digraph(engine="neato")
-    graph.attr("graph", size=f"{CANVAS_INCH},{CANVAS_INCH}!", ratio="1", margin="0.2", pad="0.1", splines="line")
     graph.attr(
-        "node",
-        pin="true",
-        shape="circle",
-        fixedsize="true",
-        width=f"{node_width_in:.2f}",
-        style="filled",
-        fontname="Helvetica",
-        fontsize=FONT_SIZE,
-        penwidth=str(NODE_PENWIDTH),
+        "graph",
+        size=f"{CANVAS_INCH},{CANVAS_INCH}!",
+        ratio="1",
+        margin="0.2",
+        pad="0.1",
+        splines="line",
+        overlap="false",
     )
+    node_attributes = {
+        "shape": "circle",
+        "fixedsize": "true",
+        "width": f"{node_width_in:.2f}",
+        "style": "filled",
+        "fontname": "Helvetica",
+        "fontsize": FONT_SIZE,
+        "penwidth": str(NODE_PENWIDTH),
+    }
+    if fixed_positions:
+        node_attributes["pin"] = "true"
+    graph.attr("node", **node_attributes)
     graph.attr("edge", arrowhead="normal", arrowsize=ARROWSIZE, color="black")
     return graph
 
@@ -202,7 +214,7 @@ def _add_nodes(
     source_graph: Any,
     node_values: dict[Any, float],
     special_nodes: set[Any],
-    positions: dict[Any, tuple[float, float]],
+    positions: dict[Any, tuple[float, float]] | None,
     isolated_nodes: set[Any],
     zero_is_nonpositive: bool,
 ) -> float:
@@ -210,7 +222,7 @@ def _add_nodes(
         node_values.setdefault(node_id, 0.0)
     maximum = max(node_values.values()) if node_values else 1.0
     normalizer = mpl.colors.Normalize(vmin=1e-16, vmax=maximum if maximum > 0 else 1.0)
-    for node_id, (x_position, y_position) in positions.items():
+    for node_id in source_graph.nodes():
         value = node_values.get(node_id, 0.0)
         zero_value = value <= 0 if zero_is_nonpositive else value == 0
         fill = "#2ca02c" if zero_value else mpl.colors.rgb2hex(NODE_COLOR_MAP(normalizer(value)))
@@ -219,12 +231,14 @@ def _add_nodes(
             else SPECIAL_OUTLINE if node_id in special_nodes
             else DEFAULT_OUTLINE
         )
+        attributes = {"color": outline, "fillcolor": fill}
+        if positions is not None:
+            x_position, y_position = positions[node_id]
+            attributes["pos"] = f"{x_position:.3f},{y_position:.3f}!"
         graphviz_graph.node(
             str(node_id),
             source_graph.nodes[node_id].get("label", str(node_id)),
-            pos=f"{x_position:.3f},{y_position:.3f}!",
-            color=outline,
-            fillcolor=fill,
+            **attributes,
         )
     return maximum
 
@@ -233,12 +247,12 @@ def build_graphviz_effective(
     effective_graph: Any,
     node_values: dict[Any, float],
     special_nodes: set[Any],
-    positions: dict[Any, tuple[float, float]],
+    positions: dict[Any, tuple[float, float]] | None,
     node_width_in: float,
     isolated_nodes: set[Any] | None = None,
 ) -> tuple[graphviz.Digraph, float]:
     """Build the Graphviz nodes for an edge-effectiveness network view."""
-    graphviz_graph = _graph_with_standard_attributes(node_width_in)
+    graphviz_graph = _graph_with_standard_attributes(node_width_in, positions is not None)
     maximum = _add_nodes(
         graphviz_graph, effective_graph, node_values, special_nodes, positions,
         isolated_nodes or set(), zero_is_nonpositive=False,
@@ -250,12 +264,12 @@ def build_graphviz_structural(
     structural_graph: Any,
     node_values: dict[Any, float],
     special_nodes: set[Any],
-    positions: dict[Any, tuple[float, float]],
+    positions: dict[Any, tuple[float, float]] | None,
     node_width_in: float,
     isolated_nodes: set[Any] | None = None,
 ) -> tuple[graphviz.Digraph, float]:
     """Build the Graphviz nodes for activity, excess, or correlation views."""
-    graphviz_graph = _graph_with_standard_attributes(node_width_in)
+    graphviz_graph = _graph_with_standard_attributes(node_width_in, positions is not None)
     maximum = _add_nodes(
         graphviz_graph, structural_graph, node_values, special_nodes, positions,
         isolated_nodes or set(), zero_is_nonpositive=True,
@@ -289,14 +303,29 @@ def _has_reciprocal_edge(graph: Any, source: Any, target: Any) -> bool:
         return False
 
 
-def _add_zero_edge(graphviz_graph: graphviz.Digraph, graph: Any, source: Any, target: Any, positions: dict[Any, tuple[float, float]]) -> None:
+def _add_zero_edge(
+    graphviz_graph: graphviz.Digraph,
+    graph: Any,
+    source: Any,
+    target: Any,
+    positions: dict[Any, tuple[float, float]] | None,
+) -> None:
     graphviz_graph.edge(
         str(source), str(target), penwidth="3.5", color=ZERO_EDGE_COLOR, style=ZERO_EDGE_STYLE,
-        **curved_zero_edge_ports(source, target, positions, _has_reciprocal_edge(graph, source, target)),
+        **(
+            curved_zero_edge_ports(source, target, positions, _has_reciprocal_edge(graph, source, target))
+            if positions is not None
+            else {}
+        ),
     )
 
 
-def add_edges_effective(graphviz_graph: graphviz.Digraph, effective_graph: Any, threshold: float, positions: dict[Any, tuple[float, float]]) -> None:
+def add_edges_effective(
+    graphviz_graph: graphviz.Digraph,
+    effective_graph: Any,
+    threshold: float,
+    positions: dict[Any, tuple[float, float]] | None,
+) -> None:
     """Render above-threshold effectiveness edges and visible zero-value edges."""
     for source, target, data in effective_graph.edges(data=True):
         weight = float(data.get("weight", 0.0))
@@ -313,7 +342,7 @@ def add_edges_structural(
     edge_values: dict[tuple[Any, Any], float],
     minimum: float,
     maximum: float,
-    positions: dict[Any, tuple[float, float]],
+    positions: dict[Any, tuple[float, float]] | None,
     threshold: float | None = None,
     show_zero_dashed_at_zero_threshold: bool = False,
     signed_color: bool = False,

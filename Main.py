@@ -175,13 +175,19 @@ metric = st.sidebar.selectbox(
     on_change=clear_graph_focus,
 )
 
+# Preserve the original default for sessions created before the layout choices
+# were promoted into the main view selector.
+if st.session_state.get("network_view") == "2D":
+    st.session_state["network_view"] = "Circular"
+
 graph_view = st.sidebar.radio(
     "Network view",
-    ["2D", "3D sphere"],
+    ["Circular", "Force-directed", "3D sphere"],
     index=0,
     horizontal=True,
     key="network_view",
-    help="In 2D, nodes are placed around a circle. In 3D, nodes sit on a rotatable sphere.",
+    on_change=clear_graph_focus,
+    help="Circular places nodes on a ring. Force-directed brings connected nodes closer together. 3D sphere places nodes on a rotatable sphere.",
 )
 
 degree_mode = st.sidebar.toggle("Use in-degree for node coloring", value=False, key="degree_toggle")
@@ -289,8 +295,7 @@ weights = None
 if metric == "Edge effectiveness":
     EGf = threshold_graph(EG0, thr)
     special = detect_special_nodes(bn, EG0)
-    nodes_order, pos = circular_positions(EG0)
-    pos = {n: pos[n] for n in nodes_order}
+    pos = circular_positions(EG0)[1] if graph_view == "Circular" else None
 
     isolated = {
         n for n in EGf.nodes()
@@ -315,8 +320,7 @@ if metric == "Edge effectiveness":
 
 elif metric == "Activity":
     special = detect_special_nodes(bn, SG)
-    nodes_order, pos = circular_positions(SG)
-    pos = {n: pos[n] for n in nodes_order}
+    pos = circular_positions(SG)[1] if graph_view == "Circular" else None
 
     node_vals = node_values_from_thresholded_structural(
         SG, edge_activity, thr, degree_mode=degree_mode
@@ -340,8 +344,7 @@ elif metric == "Activity":
 
 elif metric == "Excess canalization":
     special = detect_special_nodes(bn, SG)
-    nodes_order, pos = circular_positions(SG)
-    pos = {n: pos[n] for n in nodes_order}
+    pos = circular_positions(SG)[1] if graph_view == "Circular" else None
 
     node_vals = node_values_from_thresholded_structural(
         SG, edge_excess, thr, degree_mode=degree_mode
@@ -365,8 +368,7 @@ elif metric == "Excess canalization":
 
 else:
     special = detect_special_nodes(bn, SG_corr)
-    nodes_order, pos = circular_positions(SG_corr)
-    pos = {n: pos[n] for n in nodes_order}
+    pos = circular_positions(SG_corr)[1] if graph_view == "Circular" else None
 
     node_vals = node_values_from_thresholded_structural(
         SG_corr, edge_corr, thr, degree_mode=degree_mode, use_absolute_values=True
@@ -421,7 +423,9 @@ sphere_data = spherical_graph_data(
     maximum=sphere_metric_bounds[1],
 )
 focus_reset_token = int(st.session_state.get("_graph_focus_reset_token", 0))
-graph_focus_context = f"overview-v5|{current_model_cache_key}|{focus_reset_token}"
+graph_focus_context = (
+    f"overview-v7|{current_model_cache_key}|{graph_view}|{focus_reset_token}"
+)
 
 # The sidebar callback marks deliberate selector changes before this script
 # runs. It avoids treating an initial render, model change, or graph click as
@@ -669,7 +673,7 @@ with c1:
         g,
         focused_graph_node_id,
         graph_focus_context,
-        view_mode=graph_view,
+        view_mode="3D sphere" if graph_view == "3D sphere" else "2D",
         sphere_data=sphere_data,
     )
     if isinstance(graph_click_event, dict):
