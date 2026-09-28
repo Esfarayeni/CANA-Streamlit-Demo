@@ -9,7 +9,6 @@ from pathlib import Path
 
 import graphviz
 import matplotlib as mpl
-import networkx as nx
 import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
@@ -95,28 +94,6 @@ def circular_positions(graph: Any, radius: float = RADIUS) -> tuple[list[Any], d
         for index, node_id in enumerate(sorted_nodes)
     }
     return sorted_nodes, positions
-
-
-def force_directed_positions(
-    graph: Any, radius: float = RADIUS
-) -> tuple[list[Any], dict[Any, tuple[float, float]]]:
-    """Place nodes deterministically with a spring-based force-directed layout."""
-    nodes = list(graph.nodes())
-    if not nodes:
-        return [], {}
-    sorted_nodes = sorted(nodes, key=lambda node_id: graph.nodes[node_id].get("label", str(node_id)))
-    if len(sorted_nodes) == 1:
-        return sorted_nodes, {sorted_nodes[0]: (0.0, 0.0)}
-    positions = nx.spring_layout(
-        graph,
-        seed=42,
-        scale=radius,
-        weight=None,
-    )
-    return sorted_nodes, {
-        node_id: (float(positions[node_id][0]), float(positions[node_id][1]))
-        for node_id in sorted_nodes
-    }
 
 
 def spherical_positions(graph: Any, radius: float = RADIUS) -> tuple[list[Any], dict[Any, tuple[float, float, float]]]:
