@@ -95,6 +95,7 @@ from graph_rendering import (
     build_graphviz_effective,
     build_graphviz_structural,
     circular_positions,
+    force_directed_positions,
     render_clickable_network_graph,
     render_graph_legend,
     spherical_graph_data,
@@ -295,7 +296,11 @@ weights = None
 if metric == "Edge effectiveness":
     EGf = threshold_graph(EG0, thr)
     special = detect_special_nodes(bn, EG0)
-    pos = circular_positions(EG0)[1] if graph_view == "Circular" else None
+    pos = (
+        circular_positions(EG0)[1]
+        if graph_view == "Circular"
+        else force_directed_positions(EG0)[1]
+    )
 
     isolated = {
         n for n in EGf.nodes()
@@ -320,7 +325,11 @@ if metric == "Edge effectiveness":
 
 elif metric == "Activity":
     special = detect_special_nodes(bn, SG)
-    pos = circular_positions(SG)[1] if graph_view == "Circular" else None
+    pos = (
+        circular_positions(SG)[1]
+        if graph_view == "Circular"
+        else force_directed_positions(SG)[1]
+    )
 
     node_vals = node_values_from_thresholded_structural(
         SG, edge_activity, thr, degree_mode=degree_mode
@@ -344,7 +353,11 @@ elif metric == "Activity":
 
 elif metric == "Excess canalization":
     special = detect_special_nodes(bn, SG)
-    pos = circular_positions(SG)[1] if graph_view == "Circular" else None
+    pos = (
+        circular_positions(SG)[1]
+        if graph_view == "Circular"
+        else force_directed_positions(SG)[1]
+    )
 
     node_vals = node_values_from_thresholded_structural(
         SG, edge_excess, thr, degree_mode=degree_mode
@@ -368,7 +381,11 @@ elif metric == "Excess canalization":
 
 else:
     special = detect_special_nodes(bn, SG_corr)
-    pos = circular_positions(SG_corr)[1] if graph_view == "Circular" else None
+    pos = (
+        circular_positions(SG_corr)[1]
+        if graph_view == "Circular"
+        else force_directed_positions(SG_corr)[1]
+    )
 
     node_vals = node_values_from_thresholded_structural(
         SG_corr, edge_corr, thr, degree_mode=degree_mode, use_absolute_values=True
