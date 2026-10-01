@@ -24,6 +24,7 @@
       .sphere-controls { position: absolute; top: 12px; left: 12px; display: flex; align-items: center; gap: 5px; padding: 5px; border: 1px solid rgba(148,163,184,.48); border-radius: 10px; background: rgba(255,255,255,.94); box-shadow: 0 3px 12px rgba(15,23,42,.14); }
       .sphere-control { min-width: 30px; height: 30px; padding: 0 7px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #0f172a; font: 700 16px/1 Helvetica, Arial, sans-serif; cursor: pointer; }
       .sphere-control:hover { background: #eff6ff; border-color: #60a5fa; }
+      .sphere-control:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
       .sphere-control[aria-pressed="true"] { background: #dbeafe; border-color: #2563eb; color: #1d4ed8; }
       .sphere-control:disabled { opacity: .42; cursor: default; }
       .sphere-control.clear-focus { min-width: 30px; font-size: 16px; }
@@ -32,6 +33,12 @@
       .sphere-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
       .sphere-label { position: absolute; color: #e2e8f0; font: 600 11px/1.1 Helvetica, Arial, sans-serif; text-shadow: 0 1px 4px #020617; white-space: nowrap; }
       .sphere-accessible { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+      @media (pointer: coarse) {
+        .sphere-control, .sphere-control.clear-focus { min-width: 44px; height: 44px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #network-graph g.node, #network-graph g.edge { transition: none; }
+      }
     </style>
   </head>
   <body>

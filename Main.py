@@ -70,7 +70,6 @@ def model_cache_key(source_label, model_name, uploaded_bytes=None):
 # -------------------- UI --------------------
 from model_data import (
     build_model_registry,
-    format_primary_citation,
     get_bn_display_name,
     load_cell_collective_source_info,
     load_uploaded_cnet_from_bytes,
@@ -616,6 +615,7 @@ st.markdown(
         font-size: 1.35rem;
         font-weight: 750;
         line-height: 1.1;
+        font-variant-numeric: lining-nums tabular-nums;
     }
     @media (max-width: 560px) {
         .network-parameters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -638,6 +638,9 @@ st.markdown(
             width: 100% !important;
             min-width: 100% !important;
         }
+    }
+    @media (max-width: 560px) {
+        .model-parameters-label { flex-basis: auto; }
     }
     </style>
     """,
@@ -815,7 +818,8 @@ st.markdown(
         background: transparent;
     }}
     .st-key-selected-node-parameters-slot {{
-        min-height: 142px;
+        min-height: 0;
+        margin-bottom: 48px;
     }}
     .node-parameters-label {{
         flex: 0 0 96px;
@@ -863,16 +867,15 @@ st.markdown(
         font-size: 1.3rem;
         font-weight: 750;
         line-height: 1.1;
+        font-variant-numeric: lining-nums tabular-nums;
     }}
     @media (max-width: 650px) {{
         .node-parameters-panel {{ flex-direction: column; }}
         .node-parameters-label {{ flex-basis: auto; }}
         .node-parameters {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-        .st-key-selected-node-parameters-slot {{ min-height: 210px; }}
     }}
     @media (min-width: 651px) and (max-width: 1400px) {{
         .node-parameters {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-        .st-key-selected-node-parameters-slot {{ min-height: 164px; }}
     }}
     @media (max-width: 850px) {{
         .st-key-node-detail-figures [data-testid="stHorizontalBlock"] {{
