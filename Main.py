@@ -451,7 +451,8 @@ focused_graph_node_id = (
 
 
 st.markdown(f"### {bn_name}")
-st.caption(f"Source: {source_label}")
+if source_label != "Cell Collective":
+    st.caption(f"Source: {source_label}")
 
 if source_label == "Cell Collective":
     source_info = load_cell_collective_source_info(selected_model_name)
@@ -465,27 +466,21 @@ if source_label == "Cell Collective":
                 f'<a class="source-paper-link" href="{escape(primary_reference["url"], quote=True)}" '
                 'target="_blank" rel="noopener noreferrer">Open primary paper ↗</a>'
             )
-        citation = primary_reference["citation"] if primary_reference else "No model-level primary paper is listed."
-        citation_html = format_primary_citation(
-            citation,
-            primary_reference.get("title", "") if primary_reference else "",
-        )
         st.markdown(
             f"""
             <style>
             .source-reference-line {{ color: #7a7f89; font-size: 0.875rem; line-height: 1.55; margin: 0.55rem 0 0.95rem; }}
             .source-reference-line a {{ font: inherit; font-weight: 600; text-decoration: none; }}
             .source-reference-line a:hover {{ text-decoration: underline; }}
-            .source-primary-label {{ text-decoration: underline; }}
             .source-model-link {{ color: #1667b7; }}
             .source-paper-link {{ color: #a14f22; }}
-            .source-reference-separator {{ color: #b4bbc5; padding: 0 0.35rem; }}
-            .primary-paper-title {{ font-weight: 750; color: #475569; }}
+            .source-reference-line {{ display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 20px; color:#475569; }}
+            .source-reference-line > a {{ font:inherit; font-weight:600; color:#475569; padding:4px 0; }}
+            .source-reference-line > a:focus-visible {{ outline:2px solid #1667b7; outline-offset:3px; }}
             </style>
             <div class="source-reference-line">
-              <span class="source-primary-label">Primary paper:</span> {citation_html}
-              <span class="source-reference-separator">·</span><a class="source-model-link" href="{escape(source_info['model_url'], quote=True)}" target="_blank" rel="noopener noreferrer">View model in Cell Collective ↗</a>
-              {f'<span class="source-reference-separator">·</span>{paper_link}' if paper_link else ''}
+              <a class="source-model-link" href="{escape(source_info['model_url'], quote=True)}" target="_blank" rel="noopener noreferrer">View model in Cell Collective ↗</a>
+              {paper_link}
             </div>
             """,
             unsafe_allow_html=True,
