@@ -174,19 +174,18 @@ metric = st.sidebar.selectbox(
     on_change=clear_graph_focus,
 )
 
-# Preserve the original default for sessions created before the layout choices
-# were promoted into the main view selector.
+# Migrate obsolete layout choices to the current default.
 if st.session_state.get("network_view") in {"2D", "Force-directed"}:
-    st.session_state["network_view"] = "Circular"
+    st.session_state["network_view"] = "3D sphere"
 
 graph_view = st.sidebar.radio(
     "Network view",
-    ["Circular", "3D sphere"],
+    ["3D sphere", "Circular"],
     index=0,
     horizontal=True,
     key="network_view",
     on_change=clear_graph_focus,
-    help="Circular places nodes on a ring. 3D sphere places nodes on a rotatable sphere.",
+    help="3D sphere places nodes on a rotatable sphere. Circular places nodes on a ring.",
 )
 
 degree_mode = st.sidebar.toggle("Use in-degree for node coloring", value=False, key="degree_toggle")
