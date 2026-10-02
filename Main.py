@@ -689,6 +689,9 @@ with c1:
             if not clear_focus_requested and clicked_node_name in node_names and clicked_node_name != selected_node_name:
                 st.session_state["node_schemata_select"] = clicked_node_name
                 selected_node_name = clicked_node_name
+            # Refresh the component arguments after accepting its event, rather
+            # than leaving the browser with the previous server-side focus.
+            st.rerun()
 
 selected_node_name = node_selector_slot.selectbox(
     "Select node for F' / F'' & canalization map",
@@ -869,9 +872,26 @@ st.markdown(
         line-height: 1.1;
         font-variant-numeric: lining-nums tabular-nums;
     }}
+    .model-parameters-label,
+    .node-parameters-label {{
+        flex: 0 0 6rem;
+        min-width: 0;
+    }}
+    .model-parameters-label > span:last-child,
+    .node-parameters-label > span:last-child {{ min-width: 0; }}
+    .network-parameter,
+    .node-parameter {{
+        box-sizing: border-box;
+        min-height: 4.875rem;
+        padding: 0.6875rem 0.75rem;
+    }}
     @media (max-width: 650px) {{
-        .node-parameters-panel {{ flex-direction: column; }}
+        .model-parameters-row,
+        .node-parameters-panel {{ flex-direction: column; gap: 0.75rem; }}
+        .model-parameters-label,
         .node-parameters-label {{ flex-basis: auto; }}
+        .model-parameters-row {{ margin-bottom: 1.5rem; }}
+        .network-parameters,
         .node-parameters {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     }}
     @media (min-width: 651px) and (max-width: 1400px) {{

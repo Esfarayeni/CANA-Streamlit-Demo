@@ -146,6 +146,8 @@ def spherical_graph_data(
         nodes.append({
             "id": str(node_id),
             "label": str(source_graph.nodes[node_id].get("label", node_id)),
+            "value": value,
+            "type": "Isolated after thresholding" if node_id in isolated_nodes else "Input node" if node_id in special_nodes else "Regular node",
             "x": x_position,
             "y": y_position,
             "z": z_position,
@@ -174,9 +176,9 @@ def spherical_graph_data(
             color, dashed = "#111827", metric == "Correlation" and value < 0
         edges.append({
             "source": str(source), "target": str(target), "width": float(width),
-            "color": color, "dashed": dashed,
+            "color": color, "dashed": dashed, "value": value,
         })
-    return {"nodes": nodes, "edges": edges}
+    return {"nodes": nodes, "edges": edges, "metric": metric}
 
 
 def _graph_with_standard_attributes(node_width_in: float) -> graphviz.Digraph:
